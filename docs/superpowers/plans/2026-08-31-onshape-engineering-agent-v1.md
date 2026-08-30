@@ -23,46 +23,46 @@
 
 ### Task 1: Package and strict contracts
 
-- [ ] Write failing tests proving extra JSON fields, invalid artifact types, unapproved assumptions, and malformed task edges are rejected.
-- [ ] Implement strict Pydantic contracts with versioned enums and discriminated action models.
-- [ ] Run `python -m pytest tests/test_contracts.py -q`; expect all contract tests to pass.
-- [ ] Commit `feat: add versioned engineering artifacts`.
+- [x] Write failing tests proving extra JSON fields, invalid artifact types, unapproved assumptions, and malformed task edges are rejected.
+- [x] Implement strict Pydantic contracts with versioned enums and discriminated action models.
+- [x] Run `python -m pytest tests/test_contracts.py -q`; expect all contract tests to pass.
+- [x] Commit `feat: add versioned engineering artifacts`.
 
 ### Task 2: Deny-by-default CAD Gateway
 
-- [ ] Write failing tests for `delete_workspace`, unknown actions, missing approval hashes, and allowlisted recording operations.
-- [ ] Implement plan policy validation before transport dispatch and return typed `DENIED` decisions with `network_request_sent=false`.
-- [ ] Run `python -m pytest tests/test_gateway.py -q`; expect all gateway tests to pass.
-- [ ] Commit `feat: add deterministic CAD gateway policy`.
+- [x] Write failing tests for `delete_workspace`, unknown actions, missing approval hashes, and allowlisted recording operations.
+- [x] Implement plan policy validation before transport dispatch and return typed `DENIED` decisions with `network_request_sent=false`.
+- [x] Run `python -m pytest tests/test_gateway.py -q`; expect all gateway tests to pass.
+- [x] Commit `feat: add deterministic CAD gateway policy`.
 
 ### Task 3: Task graph and closed-loop orchestrator
 
-- [ ] Write failing tests for full-design, CAD-edit, drawing-only, and analysis-only graph selection.
-- [ ] Write failing tests routing mate issues to CAD, drawing issues to Drawing, and exhausted repairs to `BLOCKED`.
-- [ ] Implement capability selection, main review gates, diagnosis routing, and bounded repair counters.
-- [ ] Run `python -m pytest tests/test_orchestrator.py -q`; expect all orchestrator tests to pass.
-- [ ] Commit `feat: orchestrate bounded engineering repair loops`.
+- [x] Write failing tests for full-design, CAD-edit, drawing-only, and analysis-only graph selection.
+- [x] Write failing tests routing mate issues to CAD, drawing issues to Drawing, and exhausted repairs to `BLOCKED`.
+- [x] Implement capability selection, main review gates, diagnosis routing, and bounded repair counters.
+- [x] Run `python -m pytest tests/test_orchestrator.py -q`; expect all orchestrator tests to pass.
+- [x] Commit `feat: orchestrate bounded engineering repair loops`.
 
 ### Task 4: Immutable artifacts and project logging
 
-- [ ] Write failing tests proving events append rather than overwrite and secrets are redacted.
-- [ ] Implement run manifests, SHA-256 artifact metadata, atomic artifact writes, and append-only JSONL events.
-- [ ] Add `PROJECT_LOG.md`, `PROJECT_MEMORY.md`, and the first sanitized development entry.
-- [ ] Run `python -m pytest tests/test_runlog.py -q`; expect all logging tests to pass.
-- [ ] Commit `feat: add auditable run artifacts and logs`.
+- [x] Write failing tests proving events append rather than overwrite and secrets are redacted.
+- [x] Implement run manifests, SHA-256 artifact metadata, atomic artifact writes, and append-only JSONL events.
+- [x] Add `PROJECT_LOG.md`, `PROJECT_MEMORY.md`, and the first sanitized development entry.
+- [x] Run `python -m pytest tests/test_runlog.py -q`; expect all logging tests to pass.
+- [x] Commit `feat: add auditable run artifacts and logs`.
 
 ### Task 5: Safe CLI demonstration
 
-- [ ] Write a failing CLI test for `onshape-agent demo --output <temp>`.
-- [ ] Implement a generic base-plate plan containing sketch and extrude actions, execute it through the recording Gateway, emit a visual finding, diagnose it, and write the run log.
-- [ ] Run `python -m pytest tests/test_cli.py -q`; expect the CLI test to pass without network or credentials.
-- [ ] Commit `feat: add safe supervised pipeline demo`.
+- [x] Write a failing CLI test for `onshape-agent demo --output <temp>`.
+- [x] Implement a generic base-plate plan containing sketch and extrude actions, execute it through the recording Gateway, emit a visual finding, diagnose it, and write the run log.
+- [x] Run `python -m pytest tests/test_cli.py -q`; expect the CLI test to pass without network or credentials.
+- [x] Commit `feat: add safe supervised pipeline demo`.
 
 ### Task 6: Documentation and publication verification
 
-- [ ] Document installation, architecture, test commands, demo output, V1 limitations, and tomorrow's manual test.
-- [ ] Run `python -m pytest -q` and `python -m ruff check .`; expect clean results.
-- [ ] Scan tracked files for credentials, course names, Week fixtures, and absolute course paths; expect no matches other than explicit generic documentation statements.
+- [x] Document installation, architecture, test commands, demo output, V1 limitations, and tomorrow's manual test.
+- [x] Run `python -m pytest -q` and `python -m ruff check .`; expect clean results.
+- [x] Scan tracked files for credentials, course names, Week fixtures, and absolute course paths; expect no matches other than explicit generic documentation statements.
 - [ ] Commit `docs: publish generic V1 workflow`.
 - [ ] Push the new root commit to remote `main` with an exact `--force-with-lease` value, then verify remote HEAD and repository visibility.
 

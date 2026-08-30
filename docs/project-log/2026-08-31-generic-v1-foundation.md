@@ -20,6 +20,7 @@ Model workers must not control external CAD systems directly. The first release 
 - Orchestrator tests for conditional task graphs and repair routing.
 - Run-log tests for append behavior, immutable artifacts, hashing, and secret redaction.
 - CLI acceptance test for generated artifacts and ordered events.
+- Mutation test: temporarily allowing `delete_workspace` caused the safety test to fail, proving that the test detects a dangerous allowlist regression; the mutation was then reverted and the full suite passed again.
 
 ## Expected result
 
