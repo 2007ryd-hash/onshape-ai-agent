@@ -39,3 +39,7 @@ Before repository replacement, the previous complete Git history was saved outsi
 ## Next step
 
 Run the safe V1 test, review the artifacts, then implement a read-only Onshape discovery adapter before enabling any cloud writes.
+
+## Publication result
+
+The generic root history replaced the private repository's previous `main` using an exact `--force-with-lease` guard. The repository remained private, and the remote head was verified after publication.

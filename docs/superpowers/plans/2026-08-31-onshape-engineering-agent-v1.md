@@ -63,8 +63,8 @@
 - [x] Document installation, architecture, test commands, demo output, V1 limitations, and tomorrow's manual test.
 - [x] Run `python -m pytest -q` and `python -m ruff check .`; expect clean results.
 - [x] Scan tracked files for credentials, course names, Week fixtures, and absolute course paths; expect no matches other than explicit generic documentation statements.
-- [ ] Commit `docs: publish generic V1 workflow`.
-- [ ] Push the new root commit to remote `main` with an exact `--force-with-lease` value, then verify remote HEAD and repository visibility.
+- [x] Commit `docs: publish generic V1 workflow`.
+- [x] Push the new root commit to remote `main` with an exact `--force-with-lease` value, then verify remote HEAD and repository visibility.
 
 ## Self-review
 
