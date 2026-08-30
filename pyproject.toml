@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onshape-engineering-agent"
+version = "0.1.0"
+description = "Supervised, artifact-driven engineering-to-Onshape automation foundation"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2,<3",
+    "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.6,<1",
+]
+
+[project.scripts]
+onshape-agent = "onshape_agent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
