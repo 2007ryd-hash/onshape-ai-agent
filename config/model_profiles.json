@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "profiles": {
+    "main_orchestrator": {
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "max"
+    },
+    "engineering_worker": {
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "max"
+    },
+    "cad_worker": {
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "max"
+    },
+    "drawing_worker": {
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "max"
+    },
+    "visual_qa_worker": {
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "max",
+      "required_capabilities": ["vision"]
+    }
+  }
+}
