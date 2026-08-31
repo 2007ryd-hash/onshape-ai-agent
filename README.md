@@ -1,86 +1,153 @@
 # Onshape Engineering Agent
 
-A supervised, artifact-driven foundation for reliable engineering-to-CAD automation.
+An open-source, locally installed engineering-to-CAD workflow for Codex and
+Claude Code.
 
-V1 demonstrates the safety architecture locally:
+The host agent does the reasoning. This repository supplies the shared CAD
+skill, specialist agent contracts, deterministic Python runtime, run artifacts,
+and installation scripts. It does **not** require an OpenAI or Anthropic API
+key.
 
-- a high-reasoning main orchestrator selects a task-dependent graph;
-- specialist workers produce strict JSON artifacts rather than chatting directly;
-- a deterministic CAD Gateway enforces an operation allowlist before dispatch;
-- visual findings are routed through main-agent diagnosis and bounded repair loops;
-- every transition and gateway decision is written to an append-only run log.
+## What works in V1.1
 
-## Important V1 boundary
+- one shared CAD skill for Codex and Claude Code;
+- Engineering, CAD, Drawing, and Visual QA specialist definitions;
+- artifact-only coordination with JSON as authoritative state;
+- a local deterministic CAD Gateway and append-only run log;
+- a Windows installer and ownership-aware uninstaller;
+- a named `simple-bracket` workflow producing a CAD plan and four-view Drawing
+  plan;
+- installation diagnostics through `doctor --json`;
+- an Apache-2.0 licensed foundation for future Onshape automation.
 
-V1 does **not** call Onshape, invoke an LLM provider, calculate real structural results, or create live drawings. Its `RecordingTransport` proves that policies, artifacts, routing, and logging work without credentials or network side effects. Live adapters are a later phase after this foundation is tested.
+V1.1 is an offline workflow release. It does not yet write to Onshape. Example
+runs explicitly report `network_request_sent=false` and
+`visual_mode=simulated`.
 
-## Architecture
+## Install on Windows
 
-```text
-User
-  -> Main Orchestrator (Sol-class model)
-  -> specialist artifact producer (Luna-class model)
-  -> main review gate
-  -> typed execution plan
-  -> deterministic CAD Gateway
-  -> injected transport
-  -> deterministic verification
-  -> Drawing artifact producer
-  -> Visual QA anomaly report
-  -> main diagnosis and bounded repair
-```
+Requirements:
 
-Agents receive only explicitly listed artifacts. JSON is authoritative; Markdown explains decisions but cannot approve dimensions or actions.
-
-## Install
-
-Python 3.12 is required.
+- Windows 10 or 11;
+- Python 3.12 through the Windows `py` launcher;
+- Codex, Claude Code, or both;
+- Git.
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+git clone https://github.com/2007ryd-hash/onshape-ai-agent.git
+cd onshape-ai-agent
+.\scripts\install.ps1 -HostTarget all
 ```
 
-## Run tomorrow's safe test
+Install only one host:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m onshape_agent.cli demo --output runs
+.\scripts\install.ps1 -HostTarget codex
+.\scripts\install.ps1 -HostTarget claude
 ```
 
-The demo prints JSON similar to:
+The installer creates `.venv`, installs the local Python package, registers the
+shared skill, installs Claude specialist definitions when requested, and writes
+local runtime state under `%LOCALAPPDATA%\onshape-engineering-agent`.
+
+Restart Codex or reload Claude Code plugins/skills after installation.
+
+## Use it
+
+Ask naturally:
+
+> Create a parametric bracket from these dimensions, produce a Drawing plan,
+> and verify the result.
+
+Or explicitly invoke `onshape-engineering` in the host.
+
+The workflow first reports understood parts, dimensions, connections, and
+unknowns. `UNKNOWN`, `NEEDS_CONFIRMATION`, and unapproved `ASSUMPTION` values
+cannot be dispatched as CAD dimensions.
+
+## Verify the installation
+
+```powershell
+.\.venv\Scripts\python.exe -m onshape_agent.cli doctor --json --repo-root .
+```
+
+Expected V1.1 status:
 
 ```json
 {
-  "network_request_sent": false,
-  "repair_target": "cad_agent",
-  "status": "REPAIR_ROUTED",
-  "visual_mode": "simulated"
+  "status": "READY_OFFLINE",
+  "provider_api_key_required": false,
+  "onshape_transport": "not_configured"
 }
 ```
 
-Open the printed run directory and inspect:
+## Run the included result
+
+```powershell
+.\.venv\Scripts\python.exe -m onshape_agent.cli example simple-bracket --output runs --repo-root .
+```
+
+The generated run contains:
 
 ```text
 manifest.json
 events.jsonl
+artifacts/problem_brief_v1.json
 artifacts/task_graph_v1.json
 artifacts/execution_plan_v1.json
 artifacts/execution_report_v1.json
+artifacts/drawing_plan_v1.json
 artifacts/visual_report_v1.json
 artifacts/diagnosis_v1.json
 ```
 
-The visual report is explicitly marked `simulated`; it is a workflow test, not evidence that a CAD model was rendered.
+These files make each stage inspectable and provide the contract for future
+live Onshape execution.
 
-## Gateway safety
+## Uninstall
 
-V1 allows only typed `ensure_*`, render, export, and read-back operations. Delete, permission, sharing, raw HTTP, credential, and unknown operations are rejected before transport dispatch. Tests verify that a proposed `delete_workspace` operation returns `DENIED` and sends no network request.
+```powershell
+.\scripts\uninstall.ps1 -HostTarget all
+```
 
-## Documentation
+The uninstaller removes only installations carrying this repository's ownership
+marker. It preserves unrelated user skills and agents. Add `-RemoveRuntime`
+only when you also want to delete this clone's `.venv`.
 
-- [V1 design](docs/superpowers/specs/2026-08-31-onshape-engineering-agent-v1-design.md)
-- [Implementation plan](docs/superpowers/plans/2026-08-31-onshape-engineering-agent-v1.md)
-- [Project log](PROJECT_LOG.md)
-- [Project memory](PROJECT_MEMORY.md)
+## Develop and test
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
+```
+
+Design and implementation records are under `docs/superpowers/`. Project
+decisions and verification evidence are recorded in `PROJECT_LOG.md` and
+`PROJECT_MEMORY.md`.
+
+## Roadmap
+
+1. read-only Onshape OAuth transport;
+2. semantic geometry resolution and read-back;
+3. one idempotent, verified sketch write;
+4. STEP/OpenCascade geometry verification;
+5. instances, Mate Connectors, and Mates;
+6. live Drawing generation;
+7. structural solver and adaptive visual QA.
+
+The long-term architecture remains:
+
+```text
+Host Main Agent
+  -> approved JSON artifacts
+  -> CAD Agent execution proposal
+  -> deterministic CAD Gateway
+  -> Onshape transport
+  -> deterministic read-back and verification
+```
+
+## License
+
+Apache License 2.0. See `LICENSE`.

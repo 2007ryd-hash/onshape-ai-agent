@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,12 @@ def test_host_manifests_identify_same_plugin(repo_root: Path) -> None:
 
     assert codex["name"] == claude["name"] == PLUGIN_NAME
     assert codex["version"] == claude["version"] == PLUGIN_VERSION
+
+
+def test_python_package_version_matches_plugin_version(repo_root: Path) -> None:
+    project = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["project"]["version"] == PLUGIN_VERSION
 
 
 def test_manifests_declare_shared_distribution_metadata(repo_root: Path) -> None:
