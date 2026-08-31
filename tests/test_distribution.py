@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from onshape_agent.contracts import ApprovalStatus, ArtifactType
+from onshape_agent.runlog import RunLog
+
 PLUGIN_NAME = "onshape-engineering-agent"
 PLUGIN_VERSION = "0.2.0"
 REPOSITORY = "https://github.com/2007ryd-hash/onshape-ai-agent"
@@ -155,6 +158,7 @@ def test_shared_skill_has_parsed_frontmatter_and_task_dependent_workflows(
             "main review",
             "cad execution plan",
             "onshape-agent",
+            "visual qa",
             "verification",
             "final review",
         ),
@@ -164,6 +168,7 @@ def test_shared_skill_has_parsed_frontmatter_and_task_dependent_workflows(
             "main review",
             "drawing plan",
             "onshape-agent",
+            "visual qa",
             "verification",
             "final review",
         ),
@@ -187,6 +192,7 @@ def test_shared_skill_has_parsed_frontmatter_and_task_dependent_workflows(
     assert "drawing plan" not in workflow_rows["analysis-only"]
     assert "drawing plan" not in workflow_rows["cad-edit"]
     assert "cad execution plan" not in workflow_rows["drawing-only"]
+    assert "visual qa" not in workflow_rows["analysis-only"]
     assert "task-dependent" in lower_body
     assert "only the full-design path" in lower_body
     assert "artifact-only" in lower_body
@@ -238,14 +244,15 @@ def test_artifact_reference_defines_authoritative_contract_boundary(
 
 def test_artifact_reference_matches_runlog_metadata_and_payload_versioning(
     repo_root: Path,
+    tmp_path: Path,
 ) -> None:
     reference_path = skill_root(repo_root) / "references" / "artifact-contracts.md"
     content = reference_path.read_text(encoding="utf-8")
     json_blocks = re.findall(r"(?is)```json\s*(.*?)\s*```", content)
 
     assert json_blocks
-    metadata = json.loads(json_blocks[0])
-    assert set(metadata) == {
+    declared_metadata = json.loads(json_blocks[0])
+    declared_fields = {
         "artifact_id",
         "artifact_type",
         "run_id",
@@ -255,6 +262,33 @@ def test_artifact_reference_matches_runlog_metadata_and_payload_versioning(
         "content_hash",
         "approval_status",
     }
+    assert set(declared_metadata) == declared_fields
+
+    log = RunLog(tmp_path, run_id="run_contract")
+    payload = {"semantic_id": "base_plate", "diameter_mm": 8}
+    reference = log.write_artifact(
+        artifact_id="cad_spec_v1",
+        artifact_type=ArtifactType.CAD_SPEC,
+        producer="cad_agent",
+        payload=payload,
+        approval_status=ApprovalStatus.APPROVED,
+        input_hashes=["sha256:input"],
+    )
+    artifact_path = log.artifacts_dir / "cad_spec_v1.json"
+    document = json.loads(artifact_path.read_text(encoding="utf-8"))
+    metadata = document["metadata"]
+
+    assert set(metadata) == declared_fields
+    assert set(metadata) == set(reference.model_dump(mode="json"))
+    assert metadata["artifact_id"] == "cad_spec_v1"
+    assert metadata["artifact_type"] == "cad_spec"
+    assert metadata["run_id"] == "run_contract"
+    assert metadata["producer"] == "cad_agent"
+    assert metadata["created_at"]
+    assert metadata["input_hashes"] == ["sha256:input"]
+    assert metadata["content_hash"].startswith("sha256:")
+    assert metadata["approval_status"] == "APPROVED"
+    assert document["payload"] == payload
     assert "schema_version" not in metadata
     normalized = re.sub(r"\s+", " ", content.lower())
     assert re.search(r"payload.{0,100}schema_version", normalized)
