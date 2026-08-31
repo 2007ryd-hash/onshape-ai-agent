@@ -12,6 +12,8 @@ from onshape_agent.contracts import (
     DesignValue,
     DrawingPlan,
     DrawingView,
+    ExecutionMode,
+    ExecutionPlan,
     TaskEdge,
     TaskGraph,
     TaskNode,
@@ -77,12 +79,13 @@ def test_drawing_plan_requires_three_orthographic_views() -> None:
         )
 
 
-def test_live_scope_rejects_missing_document_for_document_read() -> None:
+def test_live_scope_allows_missing_document_for_document_discovery() -> None:
     scope_model = getattr(contracts, "OnshapeScope", None)
     assert scope_model is not None
 
-    with pytest.raises(ValidationError):
-        scope_model(stack="cad.onshape.com", document_id=None)
+    scope = scope_model(stack="cad.onshape.com")
+
+    assert scope.document_id is None
 
 
 def test_live_scope_accepts_only_the_approved_stack_and_identifiers() -> None:
@@ -135,3 +138,30 @@ def test_transport_receipt_rejects_private_payloads_and_unknown_fields() -> None
             readback_verified=True,
             response_body={"name": "private"},
         )
+
+
+def test_execution_plan_defaults_to_simulated_without_live_scope() -> None:
+    plan = ExecutionPlan(
+        plan_id="plan_simulated",
+        approved_design_hash="sha256:approved",
+        target_scope="sandbox",
+        actions=[],
+    )
+
+    assert plan.execution_mode is ExecutionMode.SIMULATED
+    assert plan.onshape_scope is None
+
+
+def test_execution_plan_accepts_a_scoped_live_read() -> None:
+    scope = contracts.OnshapeScope(document_id="document_123")
+    plan = ExecutionPlan(
+        plan_id="plan_live",
+        approved_design_hash="sha256:approved",
+        target_scope="sandbox",
+        execution_mode=ExecutionMode.LIVE,
+        onshape_scope=scope,
+        actions=[],
+    )
+
+    assert plan.execution_mode is ExecutionMode.LIVE
+    assert plan.onshape_scope == scope

@@ -60,7 +60,7 @@ class OnshapeScope(StrictModel):
     """Approved, bounded identifiers for live Onshape reads."""
 
     stack: Literal["cad.onshape.com"] = "cad.onshape.com"
-    document_id: str = Field(min_length=1)
+    document_id: str | None = Field(default=None, min_length=1)
     wvm: Literal["w", "v", "m"] | None = None
     wvm_id: str | None = Field(default=None, min_length=1)
     element_id: str | None = Field(default=None, min_length=1)
