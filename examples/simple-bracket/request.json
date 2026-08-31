@@ -1,0 +1,18 @@
+{
+  "name": "simple-bracket",
+  "part": "simple_bracket",
+  "status": "APPROVED",
+  "dimensions_mm": {
+    "width": 60,
+    "height": 40,
+    "thickness": 8,
+    "hole_diameter": 4,
+    "hole_edge_offset": 6
+  },
+  "holes": [
+    {"semantic_id": "corner_hole_1", "position_mm": [6, 6]},
+    {"semantic_id": "corner_hole_2", "position_mm": [54, 6]},
+    {"semantic_id": "corner_hole_3", "position_mm": [54, 34]},
+    {"semantic_id": "corner_hole_4", "position_mm": [6, 34]}
+  ]
+}

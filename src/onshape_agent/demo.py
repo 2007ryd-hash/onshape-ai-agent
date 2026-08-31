@@ -9,6 +9,8 @@ from .contracts import (
     ApprovalStatus,
     ArtifactType,
     CadAction,
+    DrawingPlan,
+    DrawingView,
     ExecutionPlan,
     IssueType,
     RunState,
@@ -21,7 +23,12 @@ from .orchestrator import MainOrchestrator
 from .runlog import RunLog
 
 
-def run_demo(output: Path) -> dict[str, object]:
+def run_demo(
+    output: Path,
+    *,
+    problem_brief: dict[str, object] | None = None,
+    example_name: str | None = None,
+) -> dict[str, object]:
     """Run a safe simulation that records a visual issue and repair route."""
 
     run_id = f"run_{uuid4().hex[:12]}"
@@ -32,6 +39,15 @@ def run_demo(output: Path) -> dict[str, object]:
         stage=RunState.INTAKE,
         event="RUN_STARTED",
     )
+
+    if problem_brief is not None:
+        log.write_artifact(
+            artifact_id="problem_brief_v1",
+            artifact_type=ArtifactType.PROBLEM_BRIEF,
+            producer="main_orchestrator",
+            payload=problem_brief,
+            approval_status=ApprovalStatus.APPROVED,
+        )
 
     orchestrator = MainOrchestrator()
     graph = orchestrator.select_graph(TaskKind.FULL_DESIGN, run_id=run_id)
@@ -49,8 +65,26 @@ def run_demo(output: Path) -> dict[str, object]:
         details={"task_kind": TaskKind.FULL_DESIGN.value},
     )
 
+    dimensions = (problem_brief or {}).get("dimensions_mm", {})
+    bracket_actions = [
+        CadAction(
+            action_id=f"hole_{index}",
+            type="ensure_hole",
+            semantic_id=str(hole["semantic_id"]),
+            depends_on=["extrude_1"],
+            parameters={
+                "diameter_mm": dimensions.get("hole_diameter", 4),
+                "position_mm": hole["position_mm"],
+            },
+        )
+        for index, hole in enumerate((problem_brief or {}).get("holes", []), start=1)
+    ]
     plan = ExecutionPlan(
-        plan_id="base_plate_plan_v1",
+        plan_id=(
+            "simple_bracket_plan_v1"
+            if example_name == "simple-bracket"
+            else "base_plate_plan_v1"
+        ),
         approved_design_hash="sha256:demo-approved-design",
         target_scope="sandbox",
         actions=[
@@ -58,15 +92,23 @@ def run_demo(output: Path) -> dict[str, object]:
                 action_id="sketch_1",
                 type="ensure_sketch",
                 semantic_id="base_plate_sketch",
-                parameters={"plane": "TOP"},
+                parameters={
+                    "plane": "TOP",
+                    "width_mm": dimensions.get("width", 60),
+                    "height_mm": dimensions.get("height", 40),
+                },
             ),
             CadAction(
                 action_id="extrude_1",
                 type="ensure_extrude",
                 semantic_id="base_plate",
                 depends_on=["sketch_1"],
-                parameters={"source_sketch": "base_plate_sketch", "depth_mm": 8},
+                parameters={
+                    "source_sketch": "base_plate_sketch",
+                    "depth_mm": dimensions.get("thickness", 8),
+                },
             ),
+            *bracket_actions,
         ],
     )
     log.write_artifact(
@@ -89,6 +131,25 @@ def run_demo(output: Path) -> dict[str, object]:
         stage=RunState.CAD_EXECUTION,
         event="CAD_PLAN_EXECUTED",
         details=gateway_report.model_dump(mode="json"),
+    )
+
+    drawing_plan = DrawingPlan(
+        plan_id="simple_bracket_drawing_v1",
+        approved_design_hash=plan.approved_design_hash,
+        projection="third_angle",
+        views=[
+            DrawingView(view_id="front_view", orientation="front"),
+            DrawingView(view_id="top_view", orientation="top"),
+            DrawingView(view_id="right_view", orientation="right"),
+            DrawingView(view_id="isometric_view", orientation="isometric"),
+        ],
+    )
+    log.write_artifact(
+        artifact_id="drawing_plan_v1",
+        artifact_type=ArtifactType.DRAWING_PLAN,
+        producer="drawing_agent",
+        payload=drawing_plan.model_dump(mode="json"),
+        approval_status=ApprovalStatus.APPROVED,
     )
 
     visual_report = VisualReport(

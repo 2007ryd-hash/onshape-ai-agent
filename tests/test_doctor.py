@@ -83,13 +83,13 @@ def test_complete_fixture_is_ready_offline(tmp_path: Path) -> None:
     assert all(check.status == "PASS" for check in report.checks)
 
 
-def test_real_repository_without_task_four_example_is_not_ready() -> None:
+def test_real_repository_is_ready_after_example_is_installed() -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
     report = inspect_installation(repo_root)
 
-    assert report.status == "NOT_READY"
-    assert _check(report, "simple_bracket_request").status == "FAIL"
+    assert report.status == "READY_OFFLINE"
+    assert _check(report, "simple_bracket_request").status == "PASS"
     assert _check(report, "onshape_transport").status == "PASS"
     assert report.onshape_transport == "not_configured"
 
@@ -194,14 +194,14 @@ def test_doctor_json_command_returns_typed_report(tmp_path: Path) -> None:
     assert report.provider_api_key_required is False
 
 
-def test_doctor_json_command_reports_not_ready_for_current_repository() -> None:
+def test_doctor_json_command_reports_ready_for_current_repository() -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
     result = runner.invoke(app, ["doctor", "--json", "--repo-root", str(repo_root)])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     report = DoctorReport.model_validate(json.loads(result.stdout))
-    assert report.status == "NOT_READY"
+    assert report.status == "READY_OFFLINE"
 
 
 def test_doctor_does_not_echo_provider_secret(
