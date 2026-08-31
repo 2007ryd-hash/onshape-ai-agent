@@ -50,9 +50,9 @@
 Add tests that instantiate a live scope and receipt and compare every manifest version:
 
 ```python
-def test_live_scope_rejects_missing_document_for_document_read():
-    with pytest.raises(ValidationError):
-        OnshapeScope(stack="cad.onshape.com", document_id=None)
+def test_live_scope_allows_missing_document_for_document_discovery():
+    scope = OnshapeScope(stack="cad.onshape.com")
+    assert scope.document_id is None
 
 
 def test_transport_receipt_records_real_request_and_readback():
@@ -86,7 +86,7 @@ Add strict models with literal modes and safe summary fields:
 ```python
 class OnshapeScope(StrictModel):
     stack: Literal["cad.onshape.com"] = "cad.onshape.com"
-    document_id: str
+    document_id: str | None = None
     wvm: Literal["w", "v", "m"] | None = None
     wvm_id: str | None = None
     element_id: str | None = None
@@ -100,6 +100,11 @@ class TransportReceipt(StrictModel):
     evidence_summary: dict[str, bool | int | float | str] = Field(default_factory=dict)
     error_code: str | None = None
 ```
+
+`document_id` is optional so the scope can represent bounded document
+discovery. Operations that require a document must validate that requirement
+at the operation boundary in Task 3 rather than rejecting the discovery scope
+when it is constructed.
 
 Set every version-bearing source to `1.11.0`.
 
