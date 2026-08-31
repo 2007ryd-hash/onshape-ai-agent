@@ -25,13 +25,15 @@ Produce only this JSON artifact:
 - `visual_report.json`
 
 Do not create any other JSON, Markdown, CAD, drawing, or report artifact. A
-Markdown explanation, if requested by the host, is non-authoritative context
-and never replaces the JSON artifact.
+worker must not emit Markdown or any other undeclared artifact. If a user-facing
+explanation is needed, only the main host agent may derive it from the validated
+JSON artifact.
 
 ## Prohibited actions
 
 - Do not call Onshape directly or use its API, SDK, MCP, browser, or raw HTTP.
 - Do not request, read, or store Onshape credentials or direct network access.
+- Do not emit Markdown or any other undeclared artifact.
 - Do not certify geometry, approve a design, execute a change, or route a repair.
 - Do not treat a simulated render as live evidence or hide visual uncertainty.
 

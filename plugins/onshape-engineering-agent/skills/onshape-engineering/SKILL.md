@@ -16,8 +16,9 @@ call Onshape directly.
 
 ## Artifact-only boundary
 
-- JSON is authoritative state. Markdown may explain a decision, but it
-  cannot approve dimensions, actions, or a repair.
+- JSON is authoritative state. Only the main host may explain a decision to the
+  user, and that explanation must be derived from validated JSON; workers do
+  not emit Markdown or any other undeclared artifact.
 - Read [the artifact contract reference](references/artifact-contracts.md)
   before creating or validating a specialist artifact.
 - Keep every artifact immutable. A repair creates a new version and preserves
@@ -35,41 +36,48 @@ or arbitrary network access. In particular, a worker must never call Onshape
 directly. The main host reviews worker artifacts, and the deterministic local
 runtime is the only execution boundary.
 
-## Required workflow
+## Task-dependent workflow
 
-Follow this sequence for every request, even when a stage is short:
+The main host classifies each request as `analysis-only`, `cad-edit`,
+`drawing-only`, or `full-design` and selects only the applicable stages. The
+following routing table is the contract; only the full-design path runs the
+complete chain:
 
-```text
-intake -> requirement artifact -> main review -> CAD execution plan -> local `onshape-agent` command -> drawing plan -> verification -> final review
-```
+| Task type | Applicable stages, in order |
+| --- | --- |
+| `analysis-only` | intake -> requirement artifact -> main review -> analysis -> verification -> final review |
+| `cad-edit` | intake -> requirement artifact -> main review -> CAD execution plan -> local onshape-agent CLI command -> verification -> final review |
+| `drawing-only` | intake -> requirement artifact -> main review -> drawing plan -> local onshape-agent CLI command -> verification -> final review |
+| `full-design` | intake -> requirement artifact -> main review -> CAD execution plan -> local onshape-agent CLI command -> drawing plan -> verification -> final review |
 
-1. **Intake** - classify the request as analysis, CAD, assembly, drawing, or
-   verification work. Capture units, scope, source references, and requested
-   deliverables without inventing dimensions.
+1. **Intake** - classify the request and capture units, scope, source
+   references, and deliverables without inventing dimensions.
 2. **Requirement artifact** - write the host-owned requirement JSON and label
    every value. Record missing information as `UNKNOWN` or
    `NEEDS_CONFIRMATION`, and record any proposed interpretation as an
    `ASSUMPTION`.
-3. **Main review** - have the main host check scope, dependencies, hashes,
-   assumptions, and policy before dispatching a worker. The main host is the
-   sole approval gate.
-4. **CAD execution plan** - route to the smallest applicable specialist and
-   collect its exact JSON outputs. Build an execution plan only from approved,
-   typed artifacts and keep the target inside the selected document scope.
-5. **Local CLI command** - invoke the installed local `onshape-agent` CLI for
-   deterministic validation, planning, execution through the configured
-   transport, and read-back. Start with `onshape-agent --help`; use a concrete
-   command such as `onshape-agent demo --output <run-directory>` only when it
-   matches the requested workflow. Do not substitute a provider SDK or a
-   direct HTTP request.
-6. **Drawing plan** - when a drawing is requested or required for review,
-   route the approved design and execution evidence to the drawing specialist.
-   State projection, units, scale, and required views in its JSON artifact.
-7. **Verification** - compare deterministic read-back evidence with the
+3. **Main review** - check scope, dependencies, hashes, assumptions, and
+   policy before dispatching a worker. The main host is the sole approval gate.
+4. **Analysis stage** - for `analysis-only` and `full-design`, collect the
+   engineering worker's exact JSON outputs and run any deterministic analysis
+   needed by the approved request.
+5. **CAD execution plan** - for `cad-edit` and `full-design`, route to the CAD
+   specialist and build a plan only from approved, typed artifacts. Keep the
+   target inside the selected document scope.
+6. **Local CLI command** - for paths that execute or verify CAD, invoke the
+   installed local `onshape-agent` CLI for deterministic validation, planning,
+   execution through the configured transport, and read-back. Start with
+   `onshape-agent --help`; use a concrete command such as
+   `onshape-agent demo --output <run-directory>` only when it matches the
+   selected task. Do not substitute a provider SDK or a direct HTTP request.
+7. **Drawing plan** - for `drawing-only` and `full-design`, route approved
+   evidence to the drawing specialist and state projection, units, scale, and
+   required views in its JSON artifact.
+8. **Verification** - compare deterministic read-back evidence with the
    approved specification. Visual QA may report an observation, but it cannot
    certify geometry or override JSON evidence.
-8. **Final review** - the main host reconciles all artifacts, records any
-   unresolved issue, and either completes the run, asks the user for
+9. **Final review** - the main host reconciles selected-path artifacts, records
+   unresolved issues, and either completes the run, asks the user for
    confirmation, or routes one bounded repair. A worker never chooses its own
    repair target.
 

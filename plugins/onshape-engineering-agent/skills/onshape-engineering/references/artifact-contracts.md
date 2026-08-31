@@ -1,9 +1,9 @@
 # Artifact Contracts
 
 This reference defines the hand-off boundary for the `onshape-engineering`
-skill. The JSON artifact is the source of truth. Markdown is explanatory only:
-it may summarize a decision, but it cannot add dimensions, approve an action,
-or change a repair route.
+skill. The JSON artifact is authoritative source of truth. Only the main host may explain
+validated JSON to the user; that Markdown explanation cannot add dimensions,
+approve an action, or change a repair route. Workers do not emit Markdown.
 
 ## Common envelope
 
@@ -59,8 +59,9 @@ its row and no other deliverable files:
 
 Each output must identify its producer, input artifact hashes, assumptions, and
 approval status. A worker must not create another worker's output, edit an
-existing version, or emit an approval artifact. Any Markdown explanation is
-non-authoritative context and is not a substitute for one of these JSON files.
+existing version, emit an approval artifact, or emit Markdown. If a user-facing
+explanation is needed, the main host derives it from the validated JSON; it is
+not a substitute for one of these JSON files.
 
 ### `engineering_model.json`
 

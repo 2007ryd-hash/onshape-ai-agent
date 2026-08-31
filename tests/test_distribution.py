@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 PLUGIN_NAME = "onshape-engineering-agent"
 PLUGIN_VERSION = "0.2.0"
@@ -104,62 +105,114 @@ def skill_root(repo_root: Path) -> Path:
     return repo_root.joinpath(*SKILL_ROOT_PARTS)
 
 
-def test_shared_skill_has_skill_creator_frontmatter_and_workflow(
+def read_yaml_frontmatter(path: Path) -> tuple[dict, str]:
+    content = path.read_text(encoding="utf-8")
+    match = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
+
+    assert match is not None
+    frontmatter = yaml.safe_load(match.group(1))
+    assert isinstance(frontmatter, dict)
+    return frontmatter, content[match.end() :]
+
+
+def extract_section(body: str, heading: str) -> str:
+    pattern = rf"(?is)^##\s+{re.escape(heading)}\s*$([\s\S]*?)(?=^##\s|\Z)"
+    match = re.search(pattern, body, re.MULTILINE)
+    assert match is not None
+    return match.group(1)
+
+
+def test_shared_skill_has_parsed_frontmatter_and_task_dependent_workflows(
     repo_root: Path,
 ) -> None:
     skill_path = skill_root(repo_root) / "SKILL.md"
-    content = skill_path.read_text(encoding="utf-8")
-    frontmatter_match = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
-
-    assert frontmatter_match is not None
-    frontmatter = frontmatter_match.group(1)
-    frontmatter_keys = {
-        line.split(":", 1)[0].strip()
-        for line in frontmatter.splitlines()
-        if ":" in line
-    }
-    assert frontmatter_keys == {"name", "description"}
-    assert re.search(r"(?m)^name:\s*onshape-engineering\s*$", frontmatter)
-    assert re.search(r"(?m)^description:\s*\S", frontmatter)
-
-    body = content[frontmatter_match.end() :]
+    frontmatter, body = read_yaml_frontmatter(skill_path)
     lower_body = body.lower()
-    workflow = (
-        "intake",
-        "requirement artifact",
-        "main review",
-        "cad execution plan",
-        "local `onshape-agent` command",
-        "drawing plan",
-        "verification",
-        "final review",
-    )
-    workflow_body = lower_body[lower_body.index("intake ->") :]
-    positions = [workflow_body.index(step) for step in workflow]
-    assert positions == sorted(positions)
+
+    assert set(frontmatter) == {"name", "description"}
+    assert frontmatter["name"] == SKILL_NAME
+    assert isinstance(frontmatter["description"], str)
+    assert frontmatter["description"].strip()
+
+    workflow_rows = {
+        task_type: stages.lower()
+        for task_type, stages in re.findall(
+            r"(?im)^\|\s*`([^`]+)`\s*\|\s*([^|]+)\|", body
+        )
+    }
+    required_stages = {
+        "analysis-only": (
+            "intake",
+            "requirement artifact",
+            "main review",
+            "analysis",
+            "verification",
+            "final review",
+        ),
+        "cad-edit": (
+            "intake",
+            "requirement artifact",
+            "main review",
+            "cad execution plan",
+            "onshape-agent",
+            "verification",
+            "final review",
+        ),
+        "drawing-only": (
+            "intake",
+            "requirement artifact",
+            "main review",
+            "drawing plan",
+            "onshape-agent",
+            "verification",
+            "final review",
+        ),
+        "full-design": (
+            "intake",
+            "requirement artifact",
+            "main review",
+            "cad execution plan",
+            "onshape-agent",
+            "drawing plan",
+            "verification",
+            "final review",
+        ),
+    }
+    for task_type, stages in required_stages.items():
+        assert task_type in workflow_rows
+        positions = [workflow_rows[task_type].index(stage) for stage in stages]
+        assert positions == sorted(positions)
+    assert "drawing plan" not in workflow_rows["analysis-only"]
+    assert "drawing plan" not in workflow_rows["cad-edit"]
+    assert "cad execution plan" not in workflow_rows["drawing-only"]
+    assert "task-dependent" in lower_body
+    assert "only the full-design path" in lower_body
     assert "artifact-only" in lower_body
     assert "json is authoritative" in lower_body
-    assert "references/artifact-contracts.md" in body
+    reference_links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", body)
+    assert any(
+        (skill_path.parent / link).is_file()
+        for link in reference_links
+        if not re.match(r"^[a-z]+://", link)
+    )
     for marker in ("UNKNOWN", "NEEDS_CONFIRMATION", "ASSUMPTION"):
         assert f"`{marker}`" in body
     assert "`onshape-agent`" in body
     assert "`simulated`" in body
     assert "`live`" in body
     assert "worker" in lower_body and "onshape" in lower_body
-    assert "TODO" not in content
-    assert "[TODO" not in content
+    assert "TODO" not in skill_path.read_text(encoding="utf-8")
 
 
 def test_openai_metadata_allows_normal_implicit_invocation(repo_root: Path) -> None:
     metadata_path = skill_root(repo_root) / "agents" / "openai.yaml"
-    content = metadata_path.read_text(encoding="utf-8")
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
 
-    assert "interface:" in content
-    assert 'display_name: "Onshape Engineering"' in content
-    assert "short_description:" in content
-    assert "default_prompt:" in content
-    assert "policy:" in content
-    assert "allow_implicit_invocation: true" in content
+    assert isinstance(metadata, dict)
+    assert metadata["policy"]["allow_implicit_invocation"] is True
+    assert metadata["interface"]["display_name"] == "Onshape Engineering"
+    assert metadata["interface"]["short_description"]
+    assert metadata["interface"]["default_prompt"]
 
 
 def test_artifact_reference_defines_authoritative_contract_boundary(
@@ -188,25 +241,53 @@ def test_specialist_contracts_have_unique_names_and_exact_json_outputs(
 ) -> None:
     agents_root = repo_root / "plugins" / PLUGIN_NAME / "agents"
     discovered_names: list[str] = []
+    discovered_outputs: list[str] = []
 
     for agent_name, output_names in AGENT_OUTPUTS.items():
-        content = (agents_root / f"{agent_name}.md").read_text(encoding="utf-8")
-        name_match = re.search(r"(?m)^name:\s*([a-z0-9-]+)\s*$", content)
+        content_path = agents_root / f"{agent_name}.md"
+        frontmatter, body = read_yaml_frontmatter(content_path)
+        lower_body = body.lower()
+        outputs_section = extract_section(body, "Exact outputs")
+        prohibited_section = extract_section(body, "Prohibited actions")
+        extracted_outputs = tuple(
+            re.findall(r"`([a-z0-9_-]+\.json)`", outputs_section)
+        )
 
-        assert name_match is not None
-        discovered_names.append(name_match.group(1))
-        assert name_match.group(1) == agent_name
-        assert "allowed inputs" in content.lower()
-        assert "exact outputs" in content.lower()
-        assert "produce only" in content.lower()
-        assert "json" in content.lower()
-        for output_name in output_names:
-            assert f"`{output_name}`" in content
-        assert "onshape" in content.lower()
-        assert "do not" in content.lower()
-        assert "main host agent" in content.lower()
-        assert "approve" in content.lower()
-        assert "repair routing" in content.lower()
-        assert "TODO" not in content
+        discovered_names.append(frontmatter["name"])
+        discovered_outputs.extend(extracted_outputs)
+        assert frontmatter["name"] == agent_name
+        assert isinstance(frontmatter.get("description"), str)
+        assert extracted_outputs == output_names
+        assert all(output.endswith(".json") for output in extracted_outputs)
+        assert "allowed inputs" in lower_body
+        assert "produce only" in lower_body
+        assert "json" in lower_body
+        assert re.search(
+            r"\b(?:do not|must not|never)\b[^\n.]*markdown",
+            prohibited_section,
+            re.IGNORECASE,
+        )
+        assert re.search(
+            r"\b(?:do not|must not|never)\b[^\n.]*onshape",
+            prohibited_section,
+            re.IGNORECASE,
+        )
+        assert "main host agent" in lower_body
+        assert "approval" in lower_body
+        assert "repair routing" in lower_body
+        assert "only the main host agent" in lower_body
+        assert "explanation" in lower_body
+        assert re.search(r"validated\s+json", lower_body)
+        assert "TODO" not in content_path.read_text(encoding="utf-8")
 
     assert len(discovered_names) == len(set(discovered_names)) == len(AGENT_OUTPUTS)
+    assert len(discovered_outputs) == len(set(discovered_outputs))
+    assert set(discovered_outputs) == {
+        output for outputs in AGENT_OUTPUTS.values() for output in outputs
+    }
+    assert not any(
+        re.search(
+            r"(?:state|status|manifest|event|log|context|approval|repair)", output
+        )
+        for output in discovered_outputs
+    )
