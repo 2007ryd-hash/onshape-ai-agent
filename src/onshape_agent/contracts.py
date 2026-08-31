@@ -51,6 +51,34 @@ class TaskKind(StrEnum):
     ANALYSIS_ONLY = "analysis_only"
 
 
+class ExecutionMode(StrEnum):
+    SIMULATED = "simulated"
+    LIVE = "live"
+
+
+class OnshapeScope(StrictModel):
+    """Approved, bounded identifiers for live Onshape reads."""
+
+    stack: Literal["cad.onshape.com"] = "cad.onshape.com"
+    document_id: str = Field(min_length=1)
+    wvm: Literal["w", "v", "m"] | None = None
+    wvm_id: str | None = Field(default=None, min_length=1)
+    element_id: str | None = Field(default=None, min_length=1)
+
+
+class TransportReceipt(StrictModel):
+    """Safe summary of one deterministic transport operation."""
+
+    operation: str = Field(min_length=1)
+    status: Literal["SUCCEEDED", "FAILED"]
+    network_request_sent: bool
+    readback_verified: bool
+    evidence_summary: dict[str, bool | int | float | str] = Field(
+        default_factory=dict
+    )
+    error_code: str | None = Field(default=None, min_length=1)
+
+
 class IssueType(StrEnum):
     ENGINEERING_MODEL_ERROR = "engineering_model_error"
     CAD_GEOMETRY_ERROR = "cad_geometry_error"
@@ -114,6 +142,8 @@ class ExecutionPlan(StrictModel):
     plan_id: str = Field(min_length=1)
     approved_design_hash: str = Field(min_length=1)
     target_scope: Literal["sandbox"]
+    execution_mode: ExecutionMode = ExecutionMode.SIMULATED
+    onshape_scope: OnshapeScope | None = None
     assumptions: list[DesignValue] = Field(default_factory=list)
     actions: list[CadAction]
 

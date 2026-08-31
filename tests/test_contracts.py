@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+import onshape_agent.contracts as contracts
 from onshape_agent.contracts import (
     ApprovalStatus,
     ArtifactRef,
@@ -73,4 +74,64 @@ def test_drawing_plan_requires_three_orthographic_views() -> None:
             plan_id="drawing_1",
             approved_design_hash="sha256:approved",
             views=[DrawingView(view_id="front", orientation="front")],
+        )
+
+
+def test_live_scope_rejects_missing_document_for_document_read() -> None:
+    scope_model = getattr(contracts, "OnshapeScope", None)
+    assert scope_model is not None
+
+    with pytest.raises(ValidationError):
+        scope_model(stack="cad.onshape.com", document_id=None)
+
+
+def test_live_scope_accepts_only_the_approved_stack_and_identifiers() -> None:
+    scope_model = getattr(contracts, "OnshapeScope", None)
+    assert scope_model is not None
+
+    scope = scope_model(
+        document_id="document_123",
+        wvm="v",
+        wvm_id="version_456",
+        element_id="element_789",
+    )
+
+    assert scope.stack == "cad.onshape.com"
+    assert scope.document_id == "document_123"
+    assert scope.wvm == "v"
+    assert scope.wvm_id == "version_456"
+    assert scope.element_id == "element_789"
+
+    with pytest.raises(ValidationError):
+        scope_model(document_id="document_123", stack="enterprise.onshape.com")
+
+
+def test_transport_receipt_records_real_request_and_readback() -> None:
+    receipt_model = getattr(contracts, "TransportReceipt", None)
+    assert receipt_model is not None
+
+    receipt = receipt_model(
+        operation="get_document",
+        status="SUCCEEDED",
+        network_request_sent=True,
+        readback_verified=True,
+        evidence_summary={"document_id_matches": True},
+    )
+
+    assert receipt.network_request_sent is True
+    assert receipt.readback_verified is True
+    assert receipt.evidence_summary == {"document_id_matches": True}
+
+
+def test_transport_receipt_rejects_private_payloads_and_unknown_fields() -> None:
+    receipt_model = getattr(contracts, "TransportReceipt", None)
+    assert receipt_model is not None
+
+    with pytest.raises(ValidationError):
+        receipt_model(
+            operation="get_document",
+            status="SUCCEEDED",
+            network_request_sent=True,
+            readback_verified=True,
+            response_body={"name": "private"},
         )

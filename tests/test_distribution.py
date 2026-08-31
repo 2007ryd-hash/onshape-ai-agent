@@ -8,11 +8,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+import onshape_agent
 from onshape_agent.contracts import ApprovalStatus, ArtifactType
 from onshape_agent.runlog import RunLog
 
 PLUGIN_NAME = "onshape-engineering-agent"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "1.11.0"
 REPOSITORY = "https://github.com/2007ryd-hash/onshape-ai-agent"
 SKILL_NAME = "onshape-engineering"
 SKILL_ROOT_PARTS = (
@@ -38,6 +39,36 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def package_version() -> str:
+    return tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )["project"]["version"]
+
+
+def module_version() -> str:
+    return onshape_agent.__version__
+
+
+def plugin_versions(repo_root: Path) -> list[str]:
+    manifest_paths = [
+        repo_root / "plugins" / PLUGIN_NAME / ".codex-plugin" / "plugin.json",
+        repo_root / "plugins" / PLUGIN_NAME / ".claude-plugin" / "plugin.json",
+    ]
+    codex_marketplace = load_json(
+        repo_root / ".agents" / "plugins" / "marketplace.json"
+    )
+    claude_marketplace = load_json(repo_root / ".claude-plugin" / "marketplace.json")
+    codex_entry = codex_marketplace["plugins"][0]
+    claude_entry = claude_marketplace["plugins"][0]
+    versions = [load_json(path)["version"] for path in manifest_paths]
+    versions.extend(
+        [codex_entry["version"], claude_entry["version"]]
+    )
+    return versions
+
+
 def test_host_manifests_identify_same_plugin(repo_root: Path) -> None:
     codex = load_json(
         repo_root / "plugins" / PLUGIN_NAME / ".codex-plugin" / "plugin.json"
@@ -54,6 +85,12 @@ def test_python_package_version_matches_plugin_version(repo_root: Path) -> None:
     project = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert project["project"]["version"] == PLUGIN_VERSION
+
+
+def test_all_distribution_versions_are_1_11_0(repo_root: Path) -> None:
+    assert package_version() == PLUGIN_VERSION
+    assert module_version() == PLUGIN_VERSION
+    assert set(plugin_versions(repo_root)) == {PLUGIN_VERSION}
 
 
 def test_manifests_declare_shared_distribution_metadata(repo_root: Path) -> None:

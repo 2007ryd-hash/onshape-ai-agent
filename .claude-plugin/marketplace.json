@@ -9,7 +9,7 @@
       "name": "onshape-engineering-agent",
       "source": "./plugins/onshape-engineering-agent",
       "description": "Supervised, artifact-driven engineering-to-Onshape automation foundation.",
-      "version": "0.2.0",
+      "version": "1.11.0",
       "author": {
         "name": "2007ryd-hash",
         "url": "https://github.com/2007ryd-hash"

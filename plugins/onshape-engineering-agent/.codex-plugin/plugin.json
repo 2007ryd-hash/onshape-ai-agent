@@ -1,6 +1,6 @@
 {
   "name": "onshape-engineering-agent",
-  "version": "0.2.0",
+  "version": "1.11.0",
   "description": "Supervised, artifact-driven engineering-to-Onshape automation foundation.",
   "author": {
     "name": "2007ryd-hash",
