@@ -64,12 +64,12 @@ complete chain:
 5. **CAD execution plan** - for `cad-edit` and `full-design`, route to the CAD
    specialist and build a plan only from approved, typed artifacts. Keep the
    target inside the selected document scope.
-6. **Local CLI command** - for paths that execute or verify CAD, invoke the
-   installed local `onshape-agent` CLI for deterministic validation, planning,
-   execution through the configured transport, and read-back. Start with
-   `onshape-agent --help`; use a concrete command such as
-   `onshape-agent demo --output <run-directory>` only when it matches the
-   selected task. Do not substitute a provider SDK or a direct HTTP request.
+6. **Local CLI command** - for paths that execute or verify CAD, invoke
+   `scripts/onshape-agent.ps1` for deterministic validation, planning,
+   execution through the configured transport, and read-back. The installer
+   connects this launcher to the local `onshape-agent` CLI. Start with
+   `--help`; use `example simple-bracket --output <run-directory>` only when it
+   matches the selected task. Do not substitute a provider SDK or direct HTTP.
 7. **Drawing plan** - for `drawing-only` and `full-design`, route approved
    evidence to the drawing specialist and state projection, units, scale, and
    required views in its JSON artifact.
