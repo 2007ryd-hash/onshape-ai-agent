@@ -48,7 +48,7 @@ complete chain:
 | `analysis-only` | intake -> requirement artifact -> main review -> analysis -> verification -> final review |
 | `cad-edit` | intake -> requirement artifact -> main review -> CAD execution plan -> local onshape-agent CLI command -> verification -> final review |
 | `drawing-only` | intake -> requirement artifact -> main review -> drawing plan -> local onshape-agent CLI command -> verification -> final review |
-| `full-design` | intake -> requirement artifact -> main review -> CAD execution plan -> local onshape-agent CLI command -> drawing plan -> verification -> final review |
+| `full-design` | intake -> requirement artifact -> main review -> analysis -> CAD execution plan -> local onshape-agent CLI command -> drawing plan -> visual QA -> verification -> final review |
 
 1. **Intake** - classify the request and capture units, scope, source
    references, and deliverables without inventing dimensions.

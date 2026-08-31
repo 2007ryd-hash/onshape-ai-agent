@@ -171,9 +171,11 @@ def test_shared_skill_has_parsed_frontmatter_and_task_dependent_workflows(
             "intake",
             "requirement artifact",
             "main review",
+            "analysis",
             "cad execution plan",
             "onshape-agent",
             "drawing plan",
+            "visual qa",
             "verification",
             "final review",
         ),
@@ -190,11 +192,9 @@ def test_shared_skill_has_parsed_frontmatter_and_task_dependent_workflows(
     assert "artifact-only" in lower_body
     assert "json is authoritative" in lower_body
     reference_links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", body)
-    assert any(
-        (skill_path.parent / link).is_file()
-        for link in reference_links
-        if not re.match(r"^[a-z]+://", link)
-    )
+    reference_target = "references/artifact-contracts.md"
+    assert reference_target in reference_links
+    assert (skill_path.parent / reference_target).is_file()
     for marker in ("UNKNOWN", "NEEDS_CONFIRMATION", "ASSUMPTION"):
         assert f"`{marker}`" in body
     assert "`onshape-agent`" in body
@@ -234,6 +234,35 @@ def test_artifact_reference_defines_authoritative_contract_boundary(
     assert "input_hashes" in content
     assert "simulated" in lower_content
     assert "live" in lower_content
+
+
+def test_artifact_reference_matches_runlog_metadata_and_payload_versioning(
+    repo_root: Path,
+) -> None:
+    reference_path = skill_root(repo_root) / "references" / "artifact-contracts.md"
+    content = reference_path.read_text(encoding="utf-8")
+    json_blocks = re.findall(r"(?is)```json\s*(.*?)\s*```", content)
+
+    assert json_blocks
+    metadata = json.loads(json_blocks[0])
+    assert set(metadata) == {
+        "artifact_id",
+        "artifact_type",
+        "run_id",
+        "producer",
+        "created_at",
+        "input_hashes",
+        "content_hash",
+        "approval_status",
+    }
+    assert "schema_version" not in metadata
+    normalized = re.sub(r"\s+", " ", content.lower())
+    assert re.search(r"payload.{0,100}schema_version", normalized)
+    assert re.search(r"metadata.{0,100}schema_version", normalized)
+    assert re.search(
+        r"(?:metadata.{0,30}(?:not|never)|(?:not|never).{0,30}metadata)",
+        normalized,
+    )
 
 
 def test_specialist_contracts_have_unique_names_and_exact_json_outputs(

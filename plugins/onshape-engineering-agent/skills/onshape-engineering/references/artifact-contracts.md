@@ -14,7 +14,6 @@ and a typed payload. The metadata must include:
 {
   "artifact_id": "unique-stable-id",
   "artifact_type": "contract-defined-type",
-  "schema_version": "1.0",
   "run_id": "run-id",
   "producer": "main-host-or-specialist",
   "created_at": "UTC timestamp",
@@ -23,6 +22,10 @@ and a typed payload. The metadata must include:
   "approval_status": "PENDING"
 }
 ```
+
+These fields mirror the current `RunLog` metadata. Metadata never carries
+`schema_version`; a typed payload contract may include `schema_version` when
+that contract defines one.
 
 `approval_status` is controlled by the main host. A worker can propose a
 `PENDING` artifact, but it cannot mark its own output `APPROVED` or
