@@ -1,0 +1,6 @@
+interface:
+  display_name: "Onshape Engineering"
+  short_description: "Supervised engineering CAD workflows and verification"
+  default_prompt: "Use $onshape-engineering for an artifact-only engineering CAD workflow, route specialist JSON artifacts through main-host review, run the local onshape-agent CLI, and disclose simulated or live status."
+policy:
+  allow_implicit_invocation: true
