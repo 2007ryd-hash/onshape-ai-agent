@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "onshape-engineering-agent",
+  "displayName": "Onshape Engineering Agent",
+  "version": "0.2.0",
+  "description": "Supervised, artifact-driven engineering-to-Onshape automation foundation.",
+  "author": {
+    "name": "2007ryd-hash",
+    "url": "https://github.com/2007ryd-hash"
+  },
+  "repository": "https://github.com/2007ryd-hash/onshape-ai-agent",
+  "license": "Apache-2.0",
+  "keywords": [
+    "engineering",
+    "CAD",
+    "Onshape",
+    "automation"
+  ],
+  "skills": "./skills/"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "onshape-engineering-agent",
+  "owner": {
+    "name": "2007ryd-hash",
+    "url": "https://github.com/2007ryd-hash"
+  },
+  "plugins": [
+    {
+      "name": "onshape-engineering-agent",
+      "source": "./plugins/onshape-engineering-agent",
+      "description": "Supervised, artifact-driven engineering-to-Onshape automation foundation.",
+      "version": "0.2.0",
+      "author": {
+        "name": "2007ryd-hash",
+        "url": "https://github.com/2007ryd-hash"
+      },
+      "repository": "https://github.com/2007ryd-hash/onshape-ai-agent",
+      "license": "Apache-2.0"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "onshape-engineering-agent",
+  "interface": {
+    "displayName": "Onshape Engineering Agent"
+  },
+  "plugins": [
+    {
+      "name": "onshape-engineering-agent",
+      "source": {
+        "source": "local",
+        "path": "./plugins/onshape-engineering-agent"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

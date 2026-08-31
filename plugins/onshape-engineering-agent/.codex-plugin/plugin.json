@@ -1,0 +1,33 @@
+{
+  "name": "onshape-engineering-agent",
+  "version": "0.2.0",
+  "description": "Supervised, artifact-driven engineering-to-Onshape automation foundation.",
+  "author": {
+    "name": "2007ryd-hash",
+    "url": "https://github.com/2007ryd-hash"
+  },
+  "repository": "https://github.com/2007ryd-hash/onshape-ai-agent",
+  "license": "Apache-2.0",
+  "keywords": [
+    "engineering",
+    "CAD",
+    "Onshape",
+    "automation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Onshape Engineering Agent",
+    "shortDescription": "Supervised engineering workflows for Onshape",
+    "longDescription": "An artifact-driven engineering-to-Onshape workflow with deterministic planning, execution boundaries, and verification.",
+    "developerName": "2007ryd-hash",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Engineering analysis",
+      "CAD planning",
+      "Geometry verification"
+    ],
+    "defaultPrompt": [
+      "Plan and verify an engineering CAD workflow for my Onshape design."
+    ]
+  }
+}
