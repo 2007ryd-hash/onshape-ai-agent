@@ -94,6 +94,17 @@ def test_real_repository_without_task_four_example_is_not_ready() -> None:
     assert report.onshape_transport == "not_configured"
 
 
+def test_package_import_is_scoped_to_repository_root(tmp_path: Path) -> None:
+    _write_ready_fixture(tmp_path)
+    package_init = tmp_path / "src" / "onshape_agent" / "__init__.py"
+    package_init.unlink()
+
+    report = inspect_installation(tmp_path)
+
+    assert report.status == "NOT_READY"
+    assert _check(report, "package_import").status == "FAIL"
+
+
 @pytest.mark.parametrize(
     ("relative_path", "check_name"),
     [

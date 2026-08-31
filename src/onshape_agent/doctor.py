@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -101,10 +101,32 @@ def _python_check() -> DoctorCheck:
     )
 
 
-def _package_import_check() -> DoctorCheck:
+def _package_import_check(repo_root: Path) -> DoctorCheck:
+    package_init = repo_root / "src" / "onshape_agent" / "__init__.py"
+    if not package_init.is_file():
+        return DoctorCheck(
+            name="package_import",
+            status="FAIL",
+            detail="missing file: src/onshape_agent/__init__.py",
+        )
+
     try:
-        importlib.import_module("onshape_agent")
-    except Exception:
+        result = subprocess.run(
+            [sys.executable, "-c", "import onshape_agent"],
+            cwd=repo_root,
+            env={
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONPATH": str(repo_root / "src"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        result = None
+
+    if result is None or result.returncode != 0:
         return DoctorCheck(
             name="package_import",
             status="FAIL",
@@ -180,7 +202,7 @@ def inspect_installation(
 
     checks = [
         _python_check(),
-        _package_import_check(),
+        _package_import_check(root),
         _file_check(
             name="codex_manifest",
             path=plugin_root / ".codex-plugin" / "plugin.json",
