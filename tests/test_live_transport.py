@@ -9,7 +9,6 @@ import onshape_agent.live_transport as live_transport
 from onshape_agent.contracts import OnshapeScope, TransportReceipt
 from onshape_agent.live_transport import (
     LivePolicyDenied,
-    LiveTransportError,
     OnshapeMcpReadTransport,
 )
 
@@ -52,6 +51,13 @@ def documentless_scope() -> OnshapeScope:
     return OnshapeScope()
 
 
+def assert_failed_receipt(receipt: TransportReceipt, code: str) -> None:
+    assert receipt.status == "FAILED"
+    assert receipt.error_code == code
+    assert receipt.network_request_sent is True
+    assert receipt.readback_verified is False
+
+
 def test_auth_status_forces_validation_and_returns_safe_receipt() -> None:
     session = FakeSession({"onshape_auth_status": {"authenticated": True}})
 
@@ -86,10 +92,10 @@ def test_auth_status_maps_explicitly_logged_out_shapes_to_auth_required(
 ) -> None:
     session = FakeSession({"onshape_auth_status": response})
 
-    with pytest.raises(LiveTransportError, match="AUTH_REQUIRED") as raised:
-        OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
+    receipt = OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
 
-    assert "secret" not in str(raised.value)
+    assert_failed_receipt(receipt, "AUTH_REQUIRED")
+    assert "secret" not in receipt.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -112,8 +118,9 @@ def test_auth_status_accepts_only_explicit_success_shapes(response: object) -> N
 def test_auth_status_does_not_treat_configuration_alone_as_auth_success() -> None:
     session = FakeSession({"onshape_auth_status": {"configured": True}})
 
-    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
-        OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
+    receipt = OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
+
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
 
 
 @pytest.mark.parametrize(
@@ -389,11 +396,11 @@ def test_collection_reads_reject_recursive_error_markers_in_top_level_lists(
     )
     scope = documentless_scope if operation == "list_documents" else scoped_scope
 
-    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE") as raised:
-        OnshapeMcpReadTransport(session, scope).read(operation, {})
+    receipt = OnshapeMcpReadTransport(session, scope).read(operation, {})
 
-    assert "private-error" not in str(raised.value)
-    assert "private-message" not in str(raised.value)
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
+    assert "private-error" not in receipt.model_dump_json()
+    assert "private-message" not in receipt.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -428,8 +435,9 @@ def test_each_read_rejects_empty_or_missing_invariant(
     session = FakeSession({"onshape_api_call": response})
     scope = documentless_scope if operation == "list_documents" else scoped_scope
 
-    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
-        OnshapeMcpReadTransport(session, scope).read(operation, {})
+    receipt = OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
 
 
 @pytest.mark.parametrize(
@@ -447,8 +455,9 @@ def test_body_details_requires_non_empty_body_id_and_type(
 ) -> None:
     session = FakeSession({"onshape_api_call": response})
 
-    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
-        OnshapeMcpReadTransport(session, scoped_scope).read("body_details", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("body_details", {})
+
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
 
 
 @pytest.mark.parametrize(
@@ -466,8 +475,9 @@ def test_mass_properties_requires_non_null_numeric_body_values(
 ) -> None:
     session = FakeSession({"onshape_api_call": response})
 
-    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
-        OnshapeMcpReadTransport(session, scoped_scope).read("mass_properties", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("mass_properties", {})
+
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
 
 
 @pytest.mark.parametrize(
@@ -505,8 +515,9 @@ def test_bounding_boxes_require_finite_non_reversed_axes(
 ) -> None:
     session = FakeSession({"onshape_api_call": response})
 
-    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
-        OnshapeMcpReadTransport(session, scoped_scope).read("bounding_boxes", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("bounding_boxes", {})
+
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
 
 
 @pytest.mark.parametrize("status", ["active", "ok", "succeeded"])
@@ -547,22 +558,26 @@ def test_root_error_status_rejects_success_shaped_responses(
             }
         }
     )
-    with pytest.raises(LiveTransportError):
-        OnshapeMcpReadTransport(collection_session, documentless_scope).read(
-            "list_documents", {}
-        )
+    collection_receipt = OnshapeMcpReadTransport(
+        collection_session, documentless_scope
+    ).read("list_documents", {})
+    assert collection_receipt.status == "FAILED"
 
     document_session = FakeSession(
         {"onshape_api_call": {"status": status, "id": "doc-123"}}
     )
-    with pytest.raises(LiveTransportError):
-        OnshapeMcpReadTransport(document_session, scoped_scope).read("get_document", {})
+    document_receipt = OnshapeMcpReadTransport(
+        document_session, scoped_scope
+    ).read("get_document", {})
+    assert document_receipt.status == "FAILED"
 
     auth_session = FakeSession(
         {"onshape_auth_status": {"status": status, "authenticated": True}}
     )
-    with pytest.raises(LiveTransportError):
-        OnshapeMcpReadTransport(auth_session, OnshapeScope()).auth_status()
+    auth_receipt = OnshapeMcpReadTransport(
+        auth_session, OnshapeScope()
+    ).auth_status()
+    assert auth_receipt.status == "FAILED"
 
 
 def test_get_document_missing_id_is_invalid_response_not_verified(
@@ -570,10 +585,10 @@ def test_get_document_missing_id_is_invalid_response_not_verified(
 ) -> None:
     session = FakeSession({"onshape_api_call": {"name": "private"}})
 
-    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE") as raised:
-        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
-    assert "private" not in str(raised.value)
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
+    assert "private" not in receipt.model_dump_json()
 
 
 @pytest.mark.parametrize("limit", [1, 100])
@@ -756,11 +771,11 @@ def test_get_document_requires_matching_id_in_response(
         {"onshape_api_call": {"id": "other-document", "secret": "private"}}
     )
 
-    with pytest.raises(LiveTransportError, match="VERIFICATION_FAILED") as raised:
-        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
-    assert "other-document" not in str(raised.value)
-    assert "private" not in str(raised.value)
+    assert_failed_receipt(receipt, "VERIFICATION_FAILED")
+    assert "other-document" not in receipt.model_dump_json()
+    assert "private" not in receipt.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -786,10 +801,10 @@ def test_api_status_errors_map_to_stable_codes_without_body_leak(
         }
     )
 
-    with pytest.raises(LiveTransportError, match=expected_code) as raised:
-        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
-    assert "fake-child-secret" not in str(raised.value)
+    assert_failed_receipt(receipt, expected_code)
+    assert "fake-child-secret" not in receipt.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -809,10 +824,10 @@ def test_generic_read_auth_aliases_map_to_auth_required_without_body_leak(
 ) -> None:
     session = FakeSession({"onshape_api_call": response})
 
-    with pytest.raises(LiveTransportError, match="AUTH_REQUIRED") as raised:
-        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
-    assert "private" not in str(raised.value)
+    assert_failed_receipt(receipt, "AUTH_REQUIRED")
+    assert "private" not in receipt.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -823,11 +838,10 @@ def test_invalid_or_error_response_is_sanitized(
 ) -> None:
     session = FakeSession({"onshape_api_call": response})
 
-    with pytest.raises(LiveTransportError) as raised:
-        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
-    assert raised.value.code == "INVALID_RESPONSE"
-    assert "private" not in str(raised.value)
+    assert_failed_receipt(receipt, "INVALID_RESPONSE")
+    assert "private" not in receipt.model_dump_json()
 
 
 def test_transport_receipt_contains_no_private_response_body(
@@ -853,10 +867,10 @@ def test_mcp_transport_error_code_is_stable_and_sanitized(
 
     session = FailingSession()
 
-    with pytest.raises(LiveTransportError, match="TRANSPORT_FAILED") as raised:
-        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
-    assert "fake-child-secret" not in str(raised.value)
+    assert_failed_receipt(receipt, "TRANSPORT_FAILED")
+    assert "fake-child-secret" not in receipt.model_dump_json()
 
 
 def test_scope_stack_is_fixed_to_cad_onshape_com(

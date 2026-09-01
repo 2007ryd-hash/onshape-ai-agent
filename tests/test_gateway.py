@@ -14,6 +14,7 @@ from onshape_agent.contracts import (
 )
 from onshape_agent.gateway import CadGateway, RecordingTransport
 from onshape_agent.live_transport import LivePolicyDenied, OnshapeMcpReadTransport
+from onshape_agent.mcp_stdio import McpTransportError
 
 
 def make_plan(*actions: CadAction) -> ExecutionPlan:
@@ -94,7 +95,10 @@ class FakeMcpSession:
         self.calls.append((tool_name, dict(arguments)))
         if not self.responses:
             raise AssertionError("unexpected MCP call")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def test_delete_workspace_is_denied_before_transport_dispatch() -> None:
@@ -246,6 +250,39 @@ def test_live_gateway_passes_the_whole_plan_to_transport_preflight() -> None:
     assert [action.action_id for action in transport.calls] == ["read_1", "read_2"]
 
 
+def test_gateway_denies_when_transport_mutates_preflight_snapshot() -> None:
+    class SnapshotMutatingTransport(FakeLiveTransport):
+        def preflight(self, actions: list[CadAction]) -> None:
+            super().preflight(actions)
+            actions[0].parameters["read_kind"] = "list_documents"
+
+    transport = SnapshotMutatingTransport()
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "DENIED"
+    assert report.code == "PLAN_MUTATED"
+    assert report.network_request_sent is False
+    assert transport.calls == []
+
+
+def test_gateway_dispatches_snapshot_when_original_plan_mutates_in_preflight() -> None:
+    plan = make_live_plan(read_action())
+
+    class ExternalPlanMutatingTransport(FakeLiveTransport):
+        def preflight(self, actions: list[CadAction]) -> None:
+            super().preflight(actions)
+            plan.actions[0].parameters["read_kind"] = "list_documents"
+
+    transport = ExternalPlanMutatingTransport()
+
+    report = CadGateway(transport).execute(plan)
+
+    assert report.status == "EXECUTED"
+    assert transport.calls[0].parameters["read_kind"] == "get_document"
+    assert plan.actions[0].parameters["read_kind"] == "list_documents"
+
+
 def test_live_gateway_executes_real_read_transport_with_verified_readback() -> None:
     session = FakeMcpSession([{"id": "document_123", "name": "private"}])
     transport = OnshapeMcpReadTransport(
@@ -312,6 +349,50 @@ def test_real_read_transport_dispatch_rejects_mutating_action() -> None:
         )
 
     assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (McpTransportError("TRANSPORT_TIMEOUT"), "TRANSPORT_TIMEOUT"),
+        (RuntimeError("private-child-secret"), "TRANSPORT_FAILED"),
+    ],
+)
+def test_read_returns_failed_receipt_after_mcp_call_error(
+    error: Exception, expected_code: str
+) -> None:
+    session = FakeMcpSession([error])
+    transport = OnshapeMcpReadTransport(
+        session,
+        OnshapeScope(document_id="document_123"),
+    )
+
+    receipt = transport.read("get_document", {})
+
+    assert receipt.status == "FAILED"
+    assert receipt.network_request_sent is True
+    assert receipt.readback_verified is False
+    assert receipt.error_code == expected_code
+    assert "private-child-secret" not in receipt.model_dump_json()
+    assert len(session.calls) == 1
+
+
+def test_gateway_preserves_network_sent_when_live_receipt_reports_call_failure(
+) -> None:
+    session = FakeMcpSession([McpTransportError("TRANSPORT_TIMEOUT")])
+    transport = OnshapeMcpReadTransport(
+        session,
+        OnshapeScope(document_id="document_123"),
+    )
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "FAILED"
+    assert report.code == "TRANSPORT_TIMEOUT"
+    assert report.network_request_sent is True
+    assert report.readback_verified is False
+    assert len(report.receipts) == 1
+    assert report.receipts[0].status == "FAILED"
 
 
 def test_live_gateway_derives_network_status_from_receipts() -> None:

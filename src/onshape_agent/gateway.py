@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -57,8 +59,10 @@ class CadGateway:
         except (PolicyDenied, LivePolicyDenied) as error:
             return _denied_report(plan, error.code, error.reason, transport_name)
 
+        snapshot = [action.model_copy(deep=True) for action in ordered]
+        fingerprint = _actions_fingerprint(snapshot)
         try:
-            self._transport.preflight(ordered)
+            self._transport.preflight(snapshot)
         except (PolicyDenied, LivePolicyDenied) as error:
             return _denied_report(plan, error.code, error.reason, transport_name)
         except Exception as error:
@@ -68,10 +72,17 @@ class CadGateway:
                 transport_name=transport_name,
                 reason="Transport preflight failed before dispatch.",
             )
+        if _actions_fingerprint(snapshot) != fingerprint:
+            return _denied_report(
+                plan,
+                "PLAN_MUTATED",
+                "Execution actions changed during transport preflight.",
+                transport_name,
+            )
 
         executed: list[str] = []
         receipts: list[TransportReceipt] = []
-        for action in ordered:
+        for action in snapshot:
             try:
                 receipt = self._transport.dispatch(action)
             except (PolicyDenied, LivePolicyDenied) as error:
@@ -192,6 +203,18 @@ def _transport_name(transport: CadTransport) -> str:
     if isinstance(value, str) and value:
         return value
     return type(transport).__name__
+
+
+def _actions_fingerprint(actions: Sequence[CadAction]) -> str:
+    payload = [action.model_dump(mode="python") for action in actions]
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=repr,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _transport_error_code(error: Exception) -> str:

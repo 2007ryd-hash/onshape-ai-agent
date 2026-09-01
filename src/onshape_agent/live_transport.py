@@ -258,13 +258,16 @@ class OnshapeMcpReadTransport:
             response = self._session.call_tool(
                 "onshape_auth_status", {"validate": True}
             )
+            response = self._validate_response(
+                response, allow_auth_root_status=True
+            )
+            auth_error = _auth_status_error_code(response)
+            if auth_error is not None:
+                raise LiveTransportError(auth_error)
         except Exception as error:
-            raise self._map_session_error(error) from None
+            mapped = self._map_session_error(error)
+            return self._failed_receipt("auth_status", mapped.code)
 
-        response = self._validate_response(response, allow_auth_root_status=True)
-        auth_error = _auth_status_error_code(response)
-        if auth_error is not None:
-            raise LiveTransportError(auth_error)
         self._last_response = response
         return TransportReceipt(
             operation="auth_status",
@@ -289,15 +292,16 @@ class OnshapeMcpReadTransport:
 
         try:
             response = self._session.call_tool("onshape_api_call", arguments)
+            response = self._validate_response(response)
+            if operation == "get_document":
+                self._verify_document_id(response)
+                evidence = {"document_id_matches": True}
+            else:
+                evidence = self._read_invariant(operation, response)
         except Exception as error:
-            raise self._map_session_error(error) from None
+            mapped = self._map_session_error(error)
+            return self._failed_receipt(operation, mapped.code)
 
-        response = self._validate_response(response)
-        if operation == "get_document":
-            self._verify_document_id(response)
-            evidence = {"document_id_matches": True}
-        else:
-            evidence = self._read_invariant(operation, response)
         self._last_response = response
         return TransportReceipt(
             operation=operation,
@@ -326,6 +330,19 @@ class OnshapeMcpReadTransport:
             raise LivePolicyDenied("OPERATION_DENIED")
         self._validate_scope(read_kind)
         return read_kind, self._validate_parameters(read_kind, parameters)
+
+    @staticmethod
+    def _failed_receipt(operation: str, error_code: str) -> TransportReceipt:
+        safe_code = (
+            error_code if error_code in _STABLE_ERROR_CODES else "TRANSPORT_FAILED"
+        )
+        return TransportReceipt(
+            operation=operation,
+            status="FAILED",
+            network_request_sent=True,
+            readback_verified=False,
+            error_code=safe_code,
+        )
 
     def _validate_scope(self, operation: str) -> None:
         scope = self._scope
