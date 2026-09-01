@@ -66,6 +66,56 @@ def test_auth_status_forces_validation_and_returns_safe_receipt() -> None:
 
 
 @pytest.mark.parametrize(
+    "response",
+    [
+        {"authenticated": False},
+        {"configured": False},
+        {"valid": False},
+        {"status": "invalid"},
+        {"status": "expired"},
+        {"status": "not_configured"},
+        {"status": "not_validated"},
+        {"status": "not_authenticated"},
+        {"status": "oauth_pending"},
+        {"authenticated": "false"},
+    ],
+)
+def test_auth_status_maps_explicitly_logged_out_shapes_to_auth_required(
+    response: object,
+) -> None:
+    session = FakeSession({"onshape_auth_status": response})
+
+    with pytest.raises(LiveTransportError, match="AUTH_REQUIRED") as raised:
+        OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
+
+    assert "secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"status": "valid", "auth_method": "oauth"},
+        {"authenticated": True},
+        {"valid": True},
+    ],
+)
+def test_auth_status_accepts_only_explicit_success_shapes(response: object) -> None:
+    session = FakeSession({"onshape_auth_status": response})
+
+    receipt = OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
+
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.readback_verified is True
+
+
+def test_auth_status_does_not_treat_configuration_alone_as_auth_success() -> None:
+    session = FakeSession({"onshape_auth_status": {"configured": True}})
+
+    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
+        OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
+
+
+@pytest.mark.parametrize(
     ("operation", "endpoint", "expected_path"),
     [
         ("get_document", "getDocument", {"did": "doc-123"}),
@@ -117,7 +167,22 @@ def test_document_reads_use_fixed_endpoints_and_scope(
     expected_path: dict[str, str],
     scoped_scope: OnshapeScope,
 ) -> None:
-    session = FakeSession({"onshape_api_call": {"id": "doc-123"}})
+    responses: dict[str, object] = {
+        "get_document": {"id": "doc-123"},
+        "list_workspaces": {"items": [{"id": "workspace-456"}]},
+        "read_elements": {"items": [{"id": "element-789"}]},
+        "body_details": {"bodies": [{"id": "body-1"}]},
+        "bounding_boxes": {
+            "lowX": 0.0,
+            "lowY": 0.0,
+            "lowZ": 0.0,
+            "highX": 1.0,
+            "highY": 1.0,
+            "highZ": 1.0,
+        },
+        "mass_properties": {"bodies": {"body-1": {}}},
+    }
+    session = FakeSession({"onshape_api_call": responses[operation]})
 
     receipt = OnshapeMcpReadTransport(session, scoped_scope).read(operation, {})
 
@@ -135,7 +200,7 @@ def test_document_reads_use_fixed_endpoints_and_scope(
 def test_list_documents_uses_fixed_endpoint_and_bounded_limit(
     documentless_scope: OnshapeScope,
 ) -> None:
-    session = FakeSession({"onshape_api_call": []})
+    session = FakeSession({"onshape_api_call": {"items": [{"id": "doc-123"}]}})
 
     receipt = OnshapeMcpReadTransport(session, documentless_scope).read(
         "list_documents", {"limit": 7}
@@ -149,11 +214,121 @@ def test_list_documents_uses_fixed_endpoint_and_bounded_limit(
     assert receipt.readback_verified is True
 
 
+@pytest.mark.parametrize(
+    ("operation", "response", "expected_evidence"),
+    [
+        (
+            "list_documents",
+            {"items": [{"id": "doc-123"}]},
+            {"item_count": 1},
+        ),
+        (
+            "list_workspaces",
+            {"items": [{"id": "workspace-456"}]},
+            {"item_count": 1},
+        ),
+        (
+            "read_elements",
+            {"items": [{"id": "element-789"}]},
+            {"item_count": 1},
+        ),
+        (
+            "body_details",
+            {"bodies": [{"id": "body-1"}]},
+            {"body_count": 1},
+        ),
+        (
+            "bounding_boxes",
+            {
+                "lowX": 0.0,
+                "lowY": 0.0,
+                "lowZ": 0.0,
+                "highX": 1.0,
+                "highY": 2.0,
+                "highZ": 3.0,
+            },
+            {"bounds_present": True},
+        ),
+        (
+            "mass_properties",
+            {"bodies": {"body-1": {"mass": [1.0]}}},
+            {"body_count": 1},
+        ),
+    ],
+)
+def test_each_read_accepts_its_minimal_deterministic_invariant(
+    operation: str,
+    response: object,
+    expected_evidence: dict[str, bool | int | float | str],
+    scoped_scope: OnshapeScope,
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+    scope = documentless_scope if operation == "list_documents" else scoped_scope
+
+    receipt = OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.readback_verified is True
+    assert receipt.evidence_summary == expected_evidence
+
+
+@pytest.mark.parametrize(
+    ("operation", "response"),
+    [
+        ("list_documents", []),
+        ("list_documents", {}),
+        ("list_documents", {"items": []}),
+        ("list_workspaces", []),
+        ("list_workspaces", {"items": []}),
+        ("read_elements", []),
+        ("read_elements", {"items": []}),
+        ("body_details", {}),
+        ("body_details", {"bodies": []}),
+        ("bounding_boxes", {}),
+        (
+            "bounding_boxes",
+            {
+                "lowX": 0.0,
+                "lowY": 0.0,
+                "lowZ": 0.0,
+                "highX": 1.0,
+                "highY": 2.0,
+            },
+        ),
+        ("mass_properties", {}),
+        ("mass_properties", {"bodies": {}}),
+    ],
+)
+def test_each_read_rejects_empty_or_missing_invariant(
+    operation: str,
+    response: object,
+    scoped_scope: OnshapeScope,
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+    scope = documentless_scope if operation == "list_documents" else scoped_scope
+
+    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
+        OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+
+def test_get_document_missing_id_is_invalid_response_not_verified(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": {"name": "private"}})
+
+    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE") as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert "private" not in str(raised.value)
+
+
 @pytest.mark.parametrize("limit", [1, 100])
 def test_list_documents_accepts_inclusive_limit_bounds(
     limit: int, documentless_scope: OnshapeScope
 ) -> None:
-    session = FakeSession({"onshape_api_call": []})
+    session = FakeSession({"onshape_api_call": {"items": [{"id": "doc-123"}]}})
 
     OnshapeMcpReadTransport(session, documentless_scope).read(
         "list_documents", {"limit": limit}
@@ -430,7 +605,7 @@ def test_scope_stack_is_fixed_to_cad_onshape_com(
 def test_action_parameters_are_copied_before_dispatch(
     documentless_scope: OnshapeScope,
 ) -> None:
-    session = FakeSession({"onshape_api_call": []})
+    session = FakeSession({"onshape_api_call": {"items": [{"id": "doc-123"}]}})
     parameters: dict[str, Any] = {"limit": 5}
 
     OnshapeMcpReadTransport(session, documentless_scope).read(

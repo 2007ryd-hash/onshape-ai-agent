@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any, Protocol
 
 from .contracts import OnshapeScope, TransportReceipt
@@ -103,6 +104,7 @@ _STABLE_ERROR_CODES = frozenset(
         "TRANSPORT_FAILED",
         "RESPONSE_TOO_LARGE",
         "RESPONSE_QUEUE_FULL",
+        "VERIFICATION_FAILED",
     }
 )
 _CODE_KEY_NAMES = frozenset(
@@ -117,6 +119,51 @@ _HTTP_STATUS_TEXT = {
     "ratelimited": "RATE_LIMITED",
     "toomanyrequests": "RATE_LIMITED",
 }
+_AUTH_STATUS_SUCCESS_VALUES = frozenset(
+    {"valid", "authenticated", "connected", "ready"}
+)
+_AUTH_STATUS_FAILURE_VALUES = frozenset(
+    {
+        "invalid",
+        "expired",
+        "notconfigured",
+        "notvalidated",
+        "notauthenticated",
+        "notloggedin",
+        "loggedout",
+        "oauthpending",
+        "unauthorized",
+        "authrequired",
+    }
+)
+_AUTH_FALSE_VALUES = frozenset(
+    {
+        "false",
+        "0",
+        "no",
+        "off",
+        "invalid",
+        "expired",
+        "unauthenticated",
+        "notauthenticated",
+        "notloggedin",
+        "loggedout",
+        "notconfigured",
+        "notvalidated",
+        "oauthpending",
+        "unauthorized",
+        "authrequired",
+    }
+)
+_AUTH_TRUE_VALUES = frozenset(
+    {"true", "1", "yes", "on", "valid", "authenticated", "connected", "ready"}
+)
+_AUTH_BOOLEAN_KEYS = frozenset({"authenticated", "configured", "valid"})
+_LIST_READ_OPERATIONS = frozenset(
+    {"list_documents", "list_workspaces", "read_elements"}
+)
+_LIST_CONTAINER_KEYS = frozenset({"items"})
+_BOUNDS_KEYS = frozenset({"lowX", "lowY", "lowZ", "highX", "highY", "highZ"})
 
 
 class OnshapeMcpReadTransport:
@@ -144,6 +191,9 @@ class OnshapeMcpReadTransport:
             raise self._map_session_error(error) from None
 
         response = self._validate_response(response)
+        auth_error = _auth_status_error_code(response)
+        if auth_error is not None:
+            raise LiveTransportError(auth_error)
         self._last_response = response
         return TransportReceipt(
             operation="auth_status",
@@ -172,12 +222,12 @@ class OnshapeMcpReadTransport:
             raise self._map_session_error(error) from None
 
         response = self._validate_response(response)
-        self._last_response = response
         if operation == "get_document":
             self._verify_document_id(response)
             evidence = {"document_id_matches": True}
         else:
-            evidence = {"response_present": True}
+            evidence = self._read_invariant(operation, response)
+        self._last_response = response
         return TransportReceipt(
             operation=operation,
             status="SUCCEEDED",
@@ -310,10 +360,43 @@ class OnshapeMcpReadTransport:
             raise LiveTransportError("INVALID_RESPONSE")
         return response
 
+    @staticmethod
+    def _read_invariant(
+        operation: str, response: Mapping[str, Any] | list[Any]
+    ) -> dict[str, bool | int | float | str]:
+        """Validate the smallest useful shape for each fixed read route."""
+
+        if operation in _LIST_READ_OPERATIONS:
+            items = _countable_items(operation, response)
+            if items is None:
+                raise LiveTransportError("INVALID_RESPONSE")
+            return {"item_count": len(items)}
+
+        if operation == "body_details":
+            bodies = _non_empty_list_field(response, "bodies")
+            if bodies is None:
+                raise LiveTransportError("INVALID_RESPONSE")
+            return {"body_count": len(bodies)}
+
+        if operation == "bounding_boxes":
+            if not isinstance(response, Mapping) or not _has_numeric_bounds(response):
+                raise LiveTransportError("INVALID_RESPONSE")
+            return {"bounds_present": True}
+
+        if operation == "mass_properties":
+            bodies = _non_empty_mapping_field(response, "bodies")
+            if bodies is None:
+                raise LiveTransportError("INVALID_RESPONSE")
+            return {"body_count": len(bodies)}
+
+        raise LiveTransportError("INVALID_RESPONSE")
+
     def _verify_document_id(self, response: Mapping[str, Any] | list[Any]) -> None:
-        if not isinstance(response, Mapping):
-            raise LiveTransportError("VERIFICATION_FAILED")
+        if not isinstance(response, Mapping) or not response:
+            raise LiveTransportError("INVALID_RESPONSE")
         returned_id = _find_document_id(response)
+        if returned_id is None:
+            raise LiveTransportError("INVALID_RESPONSE")
         if returned_id != self._scope.document_id:
             raise LiveTransportError("VERIFICATION_FAILED")
 
@@ -334,6 +417,165 @@ class OnshapeMcpReadTransport:
 
 def _normalise_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _auth_status_error_code(value: object) -> str | None:
+    """Return a stable result for the explicit authentication state.
+
+    The 0.5.x Onshape MCP reports ``status=valid``/``status=invalid`` while
+    wrappers and older clients commonly expose boolean ``authenticated`` or
+    ``valid`` fields.  A positive result is accepted only when one of those
+    explicit signals is present.  Any explicit negative signal wins over a
+    positive signal so a contradictory wrapper cannot be treated as logged in.
+    """
+
+    if _status_error_code(value) is not None:
+        return _status_error_code(value)
+    if not isinstance(value, Mapping) or not value:
+        return "INVALID_RESPONSE"
+
+    signals = _AuthSignals()
+    _collect_auth_signals(value, signals)
+    if signals.failure:
+        return "AUTH_REQUIRED"
+    if signals.success:
+        return None
+    return "INVALID_RESPONSE"
+
+
+class _AuthSignals:
+    """Internal accumulator for recursive authentication-state inspection."""
+
+    def __init__(self) -> None:
+        self.success = False
+        self.failure = False
+
+
+def _collect_auth_signals(
+    value: object,
+    signals: _AuthSignals,
+    *,
+    _seen: set[int] | None = None,
+    _depth: int = 0,
+) -> None:
+    if _depth > 8:
+        return
+    if _seen is None:
+        _seen = set()
+    if isinstance(value, Mapping):
+        marker = id(value)
+        if marker in _seen:
+            return
+        _seen.add(marker)
+        for raw_key, nested in value.items():
+            if not isinstance(raw_key, str):
+                continue
+            key = _normalise_key(raw_key)
+            if key == "status":
+                _collect_auth_status_value(nested, signals)
+            elif key in _AUTH_BOOLEAN_KEYS:
+                state = _auth_flag_state(nested)
+                if state is False:
+                    signals.failure = True
+                elif state is True and key != "configured":
+                    signals.success = True
+            if isinstance(nested, (Mapping, list, tuple)):
+                _collect_auth_signals(
+                    nested,
+                    signals,
+                    _seen=_seen,
+                    _depth=_depth + 1,
+                )
+        return
+    if isinstance(value, (list, tuple)):
+        marker = id(value)
+        if marker in _seen:
+            return
+        _seen.add(marker)
+        for nested in value:
+            _collect_auth_signals(
+                nested,
+                signals,
+                _seen=_seen,
+                _depth=_depth + 1,
+            )
+
+
+def _collect_auth_status_value(value: object, signals: _AuthSignals) -> None:
+    if not isinstance(value, str):
+        return
+    state = _normalise_key(value)
+    if state in _AUTH_STATUS_FAILURE_VALUES:
+        signals.failure = True
+    elif state in _AUTH_STATUS_SUCCESS_VALUES:
+        signals.success = True
+
+
+def _auth_flag_state(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return value == 1
+    if isinstance(value, str):
+        state = _normalise_key(value)
+        if state in _AUTH_FALSE_VALUES:
+            return False
+        if state in _AUTH_TRUE_VALUES:
+            return True
+    return None
+
+
+def _countable_items(
+    operation: str, response: Mapping[str, Any] | list[Any]
+) -> list[Any] | None:
+    if isinstance(response, list):
+        return response if response else None
+    if not isinstance(response, Mapping):
+        return None
+    # ``items`` is the 0.5.x getDocuments container and a safe common wrapper
+    # for the array-shaped workspace/element endpoints.
+    for key in _LIST_CONTAINER_KEYS:
+        items = response.get(key)
+        if isinstance(items, list):
+            return items if items else None
+    return None
+
+
+def _non_empty_list_field(
+    response: Mapping[str, Any] | list[Any], key: str
+) -> list[Any] | None:
+    if not isinstance(response, Mapping):
+        return None
+    value = response.get(key)
+    if isinstance(value, list) and value:
+        return value
+    return None
+
+
+def _non_empty_mapping_field(
+    response: Mapping[str, Any] | list[Any], key: str
+) -> Mapping[str, Any] | None:
+    if not isinstance(response, Mapping):
+        return None
+    value = response.get(key)
+    if isinstance(value, Mapping) and value:
+        return value
+    return None
+
+
+def _has_numeric_bounds(response: Mapping[str, Any]) -> bool:
+    if not _BOUNDS_KEYS.issubset(response):
+        return False
+    for key in _BOUNDS_KEYS:
+        value = response[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            if not isfinite(value):
+                return False
+        except (OverflowError, TypeError):
+            return False
+    return True
 
 
 def _map_stable_error_code(code: str) -> str | None:
