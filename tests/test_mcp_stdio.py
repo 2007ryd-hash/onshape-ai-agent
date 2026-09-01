@@ -152,6 +152,28 @@ def test_malformed_response_is_sanitized(
     assert "fake-child-secret" not in str(raised.value)
 
 
+def test_oversized_response_is_rejected_and_terminates_child(
+    fake_mcp_command: list[str], tmp_path: Path
+) -> None:
+    command = command_for(fake_mcp_command, "oversized", tmp_path / "trace.jsonl")
+    session = McpStdioSession(
+        command, timeout_seconds=2, max_response_bytes=256
+    )
+
+    try:
+        session.__enter__()
+        process = session.process
+        assert process is not None
+
+        with pytest.raises(McpTransportError, match="RESPONSE_TOO_LARGE") as raised:
+            session.call_tool("oversized", {})
+
+        assert process.poll() is not None
+        assert "fake-child-secret" not in str(raised.value)
+    finally:
+        session.close()
+
+
 def test_stderr_is_drained_while_waiting_for_response(
     fake_mcp_command: list[str], tmp_path: Path
 ) -> None:
@@ -225,3 +247,19 @@ def test_response_id_mismatch_is_invalid_response(
         pytest.raises(McpTransportError, match="INVALID_RESPONSE"),
     ):
         session.call_tool("wrong_id", {})
+
+
+def test_inbound_server_request_is_rejected_as_invalid_response(
+    fake_mcp_command: list[str], tmp_path: Path
+) -> None:
+    command = command_for(
+        fake_mcp_command, "server-request", tmp_path / "trace.jsonl"
+    )
+
+    with (
+        McpStdioSession(command, timeout_seconds=2) as session,
+        pytest.raises(McpTransportError, match="INVALID_RESPONSE") as raised,
+    ):
+        session.call_tool("server_request", {})
+
+    assert "fake-child-secret" not in str(raised.value)

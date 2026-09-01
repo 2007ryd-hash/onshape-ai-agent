@@ -11,8 +11,10 @@ from queue import Empty, Queue
 from typing import Any, BinaryIO
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
+DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
 
 _EOF = object()
+_OVERSIZED = object()
 
 
 class McpTransportError(RuntimeError):
@@ -31,9 +33,17 @@ class McpStdioSession:
         command: Sequence[str | Path],
         *,
         timeout_seconds: float = 10.0,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
+        if (
+            isinstance(max_response_bytes, bool)
+            or not isinstance(max_response_bytes, int)
+            or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be a positive integer")
         self._command = [str(part) for part in command]
         self._timeout_seconds = timeout_seconds
+        self._max_response_bytes = max_response_bytes
         self._process: subprocess.Popen[bytes] | None = None
         self._stdout_queue: Queue[bytes | object] = Queue()
         self._stdout_thread: threading.Thread | None = None
@@ -133,7 +143,11 @@ class McpStdioSession:
         assert process.stderr is not None
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
-            args=(process.stdout, self._stdout_queue),
+            args=(
+                process.stdout,
+                self._stdout_queue,
+                self._max_response_bytes,
+            ),
             daemon=True,
         )
         self._stderr_thread = threading.Thread(
@@ -206,6 +220,9 @@ class McpStdioSession:
             self._terminate_process()
             raise McpTransportError("TRANSPORT_TIMEOUT") from None
 
+        if raw_line is _OVERSIZED:
+            self._terminate_process()
+            raise McpTransportError("RESPONSE_TOO_LARGE")
         if raw_line is _EOF or not isinstance(raw_line, bytes):
             raise McpTransportError("TRANSPORT_FAILED")
 
@@ -217,6 +234,8 @@ class McpStdioSession:
         if not isinstance(payload, dict):
             raise McpTransportError("INVALID_RESPONSE")
         if payload.get("jsonrpc") != "2.0":
+            raise McpTransportError("INVALID_RESPONSE")
+        if "method" in payload:
             raise McpTransportError("INVALID_RESPONSE")
         response_id = payload.get("id")
         if type(response_id) is not type(expected_id) or response_id != expected_id:
@@ -249,9 +268,19 @@ class McpStdioSession:
             raise McpTransportError("INVALID_RESPONSE") from None
 
     @staticmethod
-    def _read_stdout(stream: BinaryIO, output: Queue[bytes | object]) -> None:
+    def _read_stdout(
+        stream: BinaryIO,
+        output: Queue[bytes | object],
+        max_response_bytes: int,
+    ) -> None:
         try:
-            for line in iter(stream.readline, b""):
+            while True:
+                line = stream.readline(max_response_bytes + 1)
+                if not line:
+                    break
+                if len(line) > max_response_bytes:
+                    output.put(_OVERSIZED)
+                    return
                 output.put(line)
         except (OSError, ValueError):
             pass

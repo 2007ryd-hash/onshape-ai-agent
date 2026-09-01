@@ -58,6 +58,24 @@ def _tool_response(request_id: object, scenario: str, tool_name: str) -> object:
             "result": {"content": [{"type": "text", "text": "{}"}]},
         }
 
+    if scenario == "server-request" or tool_name == "server_request":
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "sampling/createMessage",
+            "params": {"detail": SECRET},
+            "result": {"content": [{"type": "text", "text": "{}"}]},
+        }
+
+    if scenario == "oversized" or tool_name == "oversized":
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "content": [{"type": "text", "text": SECRET + ("x" * 4096)}]
+            },
+        }
+
     if scenario == "malformed" or tool_name == "malformed":
         return None
 

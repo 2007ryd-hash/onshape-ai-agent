@@ -186,7 +186,8 @@ user email addresses, or document bodies.
 ## Error Handling
 
 - MCP process launch and initialization failures map to `TRANSPORT_UNAVAILABLE`.
-- Request timeout or process exit maps to `TRANSPORT_FAILED`.
+- Request timeout maps to `TRANSPORT_TIMEOUT`; process exit maps to
+  `TRANSPORT_FAILED`.
 - `401` or expired login maps to `AUTH_REQUIRED`.
 - `403` maps to `SCOPE_DENIED`.
 - `404` maps to `NOT_FOUND`.
