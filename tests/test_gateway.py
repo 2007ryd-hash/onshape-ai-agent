@@ -54,9 +54,16 @@ class FakeLiveTransport:
         self.sends_network = sends_network
         self.preflight_actions: list[list[CadAction]] = []
         self.calls: list[CadAction] = []
+        self.preflight_scopes: list[OnshapeScope | None] = []
 
-    def preflight(self, actions: list[CadAction]) -> None:
+    def preflight(
+        self,
+        actions: list[CadAction],
+        *,
+        onshape_scope: OnshapeScope | None = None,
+    ) -> None:
         self.preflight_actions.append(list(actions))
+        self.preflight_scopes.append(onshape_scope)
         if self.preflight_error is not None:
             raise self.preflight_error
 
@@ -247,13 +254,61 @@ def test_live_gateway_passes_the_whole_plan_to_transport_preflight() -> None:
 
     assert report.status == "EXECUTED"
     assert transport.preflight_actions == [plan.actions]
+    assert transport.preflight_scopes == [plan.onshape_scope]
     assert [action.action_id for action in transport.calls] == ["read_1", "read_2"]
+
+
+def test_live_gateway_denies_plan_scope_mismatch_before_mcp_call() -> None:
+    session = FakeMcpSession([{"id": "document_B"}])
+    transport = OnshapeMcpReadTransport(
+        session,
+        OnshapeScope(document_id="document_B"),
+    )
+    plan = make_live_plan(read_action())
+    assert plan.onshape_scope is not None
+    assert plan.onshape_scope.document_id == "document_123"
+
+    report = CadGateway(transport).execute(plan)
+
+    assert report.status == "DENIED"
+    assert report.code == "SCOPE_MISMATCH"
+    assert report.network_request_sent is False
+    assert session.calls == []
+
+
+def test_live_gateway_passes_a_private_scope_snapshot_to_preflight() -> None:
+    plan = make_live_plan(read_action())
+    assert plan.onshape_scope is not None
+    original_scope = plan.onshape_scope.model_copy(deep=True)
+
+    class ScopeMutatingTransport(FakeLiveTransport):
+        def preflight(
+            self,
+            actions: list[CadAction],
+            *,
+            onshape_scope: OnshapeScope | None = None,
+        ) -> None:
+            super().preflight(actions, onshape_scope=onshape_scope)
+            plan.onshape_scope = OnshapeScope(document_id="document_B")
+            assert onshape_scope == original_scope
+
+    transport = ScopeMutatingTransport()
+
+    report = CadGateway(transport).execute(plan)
+
+    assert report.status == "EXECUTED"
+    assert transport.preflight_scopes == [original_scope]
 
 
 def test_gateway_denies_when_transport_mutates_preflight_snapshot() -> None:
     class SnapshotMutatingTransport(FakeLiveTransport):
-        def preflight(self, actions: list[CadAction]) -> None:
-            super().preflight(actions)
+        def preflight(
+            self,
+            actions: list[CadAction],
+            *,
+            onshape_scope: OnshapeScope | None = None,
+        ) -> None:
+            super().preflight(actions, onshape_scope=onshape_scope)
             actions[0].parameters["read_kind"] = "list_documents"
 
     transport = SnapshotMutatingTransport()
@@ -270,8 +325,13 @@ def test_gateway_dispatches_snapshot_when_original_plan_mutates_in_preflight() -
     plan = make_live_plan(read_action())
 
     class ExternalPlanMutatingTransport(FakeLiveTransport):
-        def preflight(self, actions: list[CadAction]) -> None:
-            super().preflight(actions)
+        def preflight(
+            self,
+            actions: list[CadAction],
+            *,
+            onshape_scope: OnshapeScope | None = None,
+        ) -> None:
+            super().preflight(actions, onshape_scope=onshape_scope)
             plan.actions[0].parameters["read_kind"] = "list_documents"
 
     transport = ExternalPlanMutatingTransport()
@@ -352,14 +412,18 @@ def test_real_read_transport_dispatch_rejects_mutating_action() -> None:
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_code"),
+    ("error", "expected_code", "expected_network"),
     [
-        (McpTransportError("TRANSPORT_TIMEOUT"), "TRANSPORT_TIMEOUT"),
-        (RuntimeError("private-child-secret"), "TRANSPORT_FAILED"),
+        (
+            McpTransportError("TRANSPORT_TIMEOUT", network_request_sent=True),
+            "TRANSPORT_TIMEOUT",
+            True,
+        ),
+        (RuntimeError("private-child-secret"), "TRANSPORT_FAILED", False),
     ],
 )
 def test_read_returns_failed_receipt_after_mcp_call_error(
-    error: Exception, expected_code: str
+    error: Exception, expected_code: str, expected_network: bool
 ) -> None:
     session = FakeMcpSession([error])
     transport = OnshapeMcpReadTransport(
@@ -370,7 +434,7 @@ def test_read_returns_failed_receipt_after_mcp_call_error(
     receipt = transport.read("get_document", {})
 
     assert receipt.status == "FAILED"
-    assert receipt.network_request_sent is True
+    assert receipt.network_request_sent is expected_network
     assert receipt.readback_verified is False
     assert receipt.error_code == expected_code
     assert "private-child-secret" not in receipt.model_dump_json()
@@ -379,7 +443,9 @@ def test_read_returns_failed_receipt_after_mcp_call_error(
 
 def test_gateway_preserves_network_sent_when_live_receipt_reports_call_failure(
 ) -> None:
-    session = FakeMcpSession([McpTransportError("TRANSPORT_TIMEOUT")])
+    session = FakeMcpSession(
+        [McpTransportError("TRANSPORT_TIMEOUT", network_request_sent=True)]
+    )
     transport = OnshapeMcpReadTransport(
         session,
         OnshapeScope(document_id="document_123"),

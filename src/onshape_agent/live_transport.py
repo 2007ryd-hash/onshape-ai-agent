@@ -33,8 +33,8 @@ class LivePolicyDenied(Exception):
 class LiveTransportError(McpTransportError):
     """A live request failed with a stable, body-free public error code."""
 
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
+    def __init__(self, code: str, network_request_sent: bool = False) -> None:
+        super().__init__(code, network_request_sent=network_request_sent)
 
 
 _EXPECTED_ENDPOINTS: Mapping[str, str] = MappingProxyType(
@@ -232,9 +232,22 @@ class OnshapeMcpReadTransport:
         self._scope = scope.model_copy(deep=True)
         self._last_response: object | None = None
 
-    def preflight(self, actions: Sequence[CadAction]) -> None:
+    def preflight(
+        self,
+        actions: Sequence[CadAction],
+        *,
+        onshape_scope: OnshapeScope | None = None,
+    ) -> None:
         """Validate every read action without calling the MCP session."""
 
+        if not isinstance(onshape_scope, OnshapeScope) or (
+            self._scope.model_dump(mode="python")
+            != onshape_scope.model_dump(mode="python")
+        ):
+            raise LivePolicyDenied(
+                "SCOPE_MISMATCH",
+                "Transport scope does not match the approved plan scope.",
+            )
         if not isinstance(actions, Sequence) or isinstance(
             actions, (str, bytes, bytearray)
         ):
@@ -254,10 +267,12 @@ class OnshapeMcpReadTransport:
         """Validate the existing local MCP authentication state."""
 
         self._validate_scope("auth_status")
+        request_sent = False
         try:
             response = self._session.call_tool(
                 "onshape_auth_status", {"validate": True}
             )
+            request_sent = True
             response = self._validate_response(
                 response, allow_auth_root_status=True
             )
@@ -266,7 +281,13 @@ class OnshapeMcpReadTransport:
                 raise LiveTransportError(auth_error)
         except Exception as error:
             mapped = self._map_session_error(error)
-            return self._failed_receipt("auth_status", mapped.code)
+            return self._failed_receipt(
+                "auth_status",
+                mapped.code,
+                network_request_sent=(
+                    request_sent or mapped.network_request_sent
+                ),
+            )
 
         self._last_response = response
         return TransportReceipt(
@@ -290,8 +311,10 @@ class OnshapeMcpReadTransport:
         parameters = self._validate_parameters(operation, safe_parameters)
         arguments = self._build_arguments(operation, parameters)
 
+        request_sent = False
         try:
             response = self._session.call_tool("onshape_api_call", arguments)
+            request_sent = True
             response = self._validate_response(response)
             if operation == "get_document":
                 self._verify_document_id(response)
@@ -300,7 +323,13 @@ class OnshapeMcpReadTransport:
                 evidence = self._read_invariant(operation, response)
         except Exception as error:
             mapped = self._map_session_error(error)
-            return self._failed_receipt(operation, mapped.code)
+            return self._failed_receipt(
+                operation,
+                mapped.code,
+                network_request_sent=(
+                    request_sent or mapped.network_request_sent
+                ),
+            )
 
         self._last_response = response
         return TransportReceipt(
@@ -332,14 +361,19 @@ class OnshapeMcpReadTransport:
         return read_kind, self._validate_parameters(read_kind, parameters)
 
     @staticmethod
-    def _failed_receipt(operation: str, error_code: str) -> TransportReceipt:
+    def _failed_receipt(
+        operation: str,
+        error_code: str,
+        *,
+        network_request_sent: bool,
+    ) -> TransportReceipt:
         safe_code = (
             error_code if error_code in _STABLE_ERROR_CODES else "TRANSPORT_FAILED"
         )
         return TransportReceipt(
             operation=operation,
             status="FAILED",
-            network_request_sent=True,
+            network_request_sent=network_request_sent,
             readback_verified=False,
             error_code=safe_code,
         )
@@ -514,17 +548,32 @@ class OnshapeMcpReadTransport:
 
     @staticmethod
     def _map_session_error(error: Exception) -> LiveTransportError:
+        network_request_sent = bool(getattr(error, "network_request_sent", False))
         if isinstance(error, LiveTransportError):
-            return error
+            if error.network_request_sent == network_request_sent:
+                return error
+            return LiveTransportError(
+                error.code,
+                network_request_sent=network_request_sent,
+            )
         code = getattr(error, "code", None)
         if isinstance(code, str):
             mapped = _map_stable_error_code(code)
             if mapped is not None:
-                return LiveTransportError(mapped)
+                return LiveTransportError(
+                    mapped,
+                    network_request_sent=network_request_sent,
+                )
         status_code = _status_error_code(error)
         if status_code is not None:
-            return LiveTransportError(status_code)
-        return LiveTransportError("TRANSPORT_FAILED")
+            return LiveTransportError(
+                status_code,
+                network_request_sent=network_request_sent,
+            )
+        return LiveTransportError(
+            "TRANSPORT_FAILED",
+            network_request_sent=network_request_sent,
+        )
 
 
 def _normalise_key(value: str) -> str:

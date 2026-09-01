@@ -24,8 +24,9 @@ _QUEUE_FULL = object()
 class McpTransportError(RuntimeError):
     """An MCP transport failure represented only by a stable public code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, network_request_sent: bool = False) -> None:
         self.code = code
+        self.network_request_sent = bool(network_request_sent)
         super().__init__(code)
 
 
@@ -118,8 +119,14 @@ class McpStdioSession:
                     "params": {"name": tool_name, "arguments": dict(arguments)},
                 }
             )
-            result = self._read_rpc_result(request_id)
-            return self._decode_tool_result(result)
+            result = self._read_rpc_result(
+                request_id,
+                network_request_sent=True,
+            )
+            return self._decode_tool_result(
+                result,
+                network_request_sent=True,
+            )
 
     def close(self) -> None:
         """Close the pipes and terminate the child; repeated calls are harmless."""
@@ -209,11 +216,16 @@ class McpStdioSession:
         )
         try:
             result = self._read_rpc_result(request_id)
-        except McpTransportError:
-            raise McpTransportError("TRANSPORT_UNAVAILABLE") from None
+        except McpTransportError as error:
+            raise McpTransportError(
+                "TRANSPORT_UNAVAILABLE",
+                network_request_sent=error.network_request_sent,
+            ) from None
 
         if result.get("protocolVersion") != MCP_PROTOCOL_VERSION:
-            raise McpTransportError("TRANSPORT_UNAVAILABLE")
+            raise McpTransportError(
+                "TRANSPORT_UNAVAILABLE", network_request_sent=True
+            )
 
         self._send(
             {"jsonrpc": "2.0", "method": "notifications/initialized"}
@@ -239,68 +251,122 @@ class McpStdioSession:
         except (TypeError, ValueError, UnicodeError):
             raise McpTransportError("INVALID_REQUEST") from None
 
+        wrote = False
         try:
             process.stdin.write(encoded + b"\n")
+            wrote = True
             process.stdin.flush()
         except (BrokenPipeError, OSError, ValueError):
-            raise McpTransportError("TRANSPORT_FAILED") from None
+            raise McpTransportError(
+                "TRANSPORT_FAILED",
+                network_request_sent=wrote,
+            ) from None
 
-    def _read_rpc_result(self, expected_id: int) -> dict[str, Any]:
+    def _read_rpc_result(
+        self, expected_id: int, *, network_request_sent: bool = True
+    ) -> dict[str, Any]:
         try:
             raw_line = self._stdout_queue.get(timeout=self._timeout_seconds)
         except Empty:
             self._terminate_process()
-            raise McpTransportError("TRANSPORT_TIMEOUT") from None
+            raise McpTransportError(
+                "TRANSPORT_TIMEOUT",
+                network_request_sent=network_request_sent,
+            ) from None
 
         if raw_line is _OVERSIZED:
             self._terminate_process()
-            raise McpTransportError("RESPONSE_TOO_LARGE")
+            raise McpTransportError(
+                "RESPONSE_TOO_LARGE",
+                network_request_sent=network_request_sent,
+            )
         if raw_line is _QUEUE_FULL:
             self._terminate_process()
-            raise McpTransportError("RESPONSE_QUEUE_FULL")
+            raise McpTransportError(
+                "RESPONSE_QUEUE_FULL",
+                network_request_sent=network_request_sent,
+            )
         if raw_line is _EOF or not isinstance(raw_line, bytes):
-            raise McpTransportError("TRANSPORT_FAILED")
+            raise McpTransportError(
+                "TRANSPORT_FAILED",
+                network_request_sent=network_request_sent,
+            )
 
         try:
             payload = json.loads(raw_line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise McpTransportError("INVALID_RESPONSE") from None
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            ) from None
 
         if not isinstance(payload, dict):
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         if payload.get("jsonrpc") != "2.0":
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         if "method" in payload:
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         response_id = payload.get("id")
         if type(response_id) is not type(expected_id) or response_id != expected_id:
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         if "error" in payload:
-            raise McpTransportError("MCP_ERROR")
+            raise McpTransportError(
+                "MCP_ERROR",
+                network_request_sent=network_request_sent,
+            )
 
         result = payload.get("result")
         if not isinstance(result, dict):
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         return result
 
     @staticmethod
-    def _decode_tool_result(result: dict[str, Any]) -> object:
+    def _decode_tool_result(
+        result: dict[str, Any], *, network_request_sent: bool = True
+    ) -> object:
         if "structuredContent" in result:
             return result["structuredContent"]
 
         content = result.get("content")
         if not isinstance(content, list) or len(content) != 1:
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         block = content[0]
         if not isinstance(block, dict) or block.get("type") != "text":
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         text = block.get("text")
         if not isinstance(text, str):
-            raise McpTransportError("INVALID_RESPONSE")
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            )
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            raise McpTransportError("INVALID_RESPONSE") from None
+            raise McpTransportError(
+                "INVALID_RESPONSE",
+                network_request_sent=network_request_sent,
+            ) from None
 
     @staticmethod
     def _read_stdout(

@@ -12,6 +12,7 @@ from .contracts import (
     ExecutionMode,
     ExecutionPlan,
     GatewayReport,
+    OnshapeScope,
     TransportReceipt,
 )
 from .live_transport import LivePolicyDenied
@@ -21,7 +22,12 @@ from .policy import PolicyDenied, validate_and_order
 class CadTransport(Protocol):
     transport_name: str
 
-    def preflight(self, actions: Sequence[CadAction]) -> None: ...
+    def preflight(
+        self,
+        actions: Sequence[CadAction],
+        *,
+        onshape_scope: OnshapeScope | None = None,
+    ) -> None: ...
 
     def dispatch(self, action: CadAction) -> TransportReceipt: ...
 
@@ -34,7 +40,12 @@ class RecordingTransport:
     def __init__(self) -> None:
         self.calls: list[CadAction] = []
 
-    def preflight(self, actions: Sequence[CadAction]) -> None:
+    def preflight(
+        self,
+        actions: Sequence[CadAction],
+        *,
+        onshape_scope: OnshapeScope | None = None,
+    ) -> None:
         """Accept the already policy-checked offline actions."""
 
     def dispatch(self, action: CadAction) -> TransportReceipt:
@@ -60,9 +71,17 @@ class CadGateway:
             return _denied_report(plan, error.code, error.reason, transport_name)
 
         snapshot = [action.model_copy(deep=True) for action in ordered]
+        scope_snapshot = (
+            plan.onshape_scope.model_copy(deep=True)
+            if plan.onshape_scope is not None
+            else None
+        )
         fingerprint = _actions_fingerprint(snapshot)
         try:
-            self._transport.preflight(snapshot)
+            self._transport.preflight(
+                snapshot,
+                onshape_scope=scope_snapshot,
+            )
         except (PolicyDenied, LivePolicyDenied) as error:
             return _denied_report(plan, error.code, error.reason, transport_name)
         except Exception as error:

@@ -293,13 +293,49 @@ def test_timeout_raises_sanitized_error_and_terminates_child(
     command = command_for(fake_mcp_command, "hang", tmp_path / "trace.jsonl")
     session = McpStdioSession(command, timeout_seconds=0.1)
 
-    with pytest.raises(McpTransportError, match="TRANSPORT_TIMEOUT"):
+    with pytest.raises(McpTransportError, match="TRANSPORT_TIMEOUT") as raised:
         with session:
             process = session.process
             assert process is not None
             session.call_tool("hang", {})
 
+    assert raised.value.network_request_sent is True
     assert process.poll() is not None
+
+
+def test_mcp_error_tracks_network_request_state() -> None:
+    before_write = McpTransportError(
+        "TRANSPORT_FAILED", network_request_sent=False
+    )
+    after_write = McpTransportError("TRANSPORT_TIMEOUT", network_request_sent=True)
+
+    assert before_write.network_request_sent is False
+    assert after_write.network_request_sent is True
+
+
+def test_write_failure_before_stdin_write_marks_request_unsent() -> None:
+    class FailingStdin:
+        def write(self, _: bytes) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            raise AssertionError("flush must not run after write failure")
+
+    class RunningProcess:
+        stdin = FailingStdin()
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    session = McpStdioSession([sys.executable])
+    session._process = RunningProcess()  # type: ignore[assignment]
+    session._initialized = True
+
+    with pytest.raises(McpTransportError, match="TRANSPORT_FAILED") as raised:
+        session.call_tool("tool", {})
+
+    assert raised.value.network_request_sent is False
 
 
 def test_close_is_idempotent_and_cleans_up_process(
@@ -332,11 +368,13 @@ def test_process_exit_is_reported_without_child_output(
 
 
 def test_missing_child_is_transport_unavailable() -> None:
+    command_name = "definitely-missing-onshape-mcp-executable"
     with pytest.raises(McpTransportError, match="TRANSPORT_UNAVAILABLE") as raised:
-        with McpStdioSession([sys.executable, "does-not-exist-fake-server.py"]):
+        with McpStdioSession([command_name]):
             pass
 
-    assert "does-not-exist" not in str(raised.value)
+    assert raised.value.network_request_sent is False
+    assert command_name not in str(raised.value)
 
 
 def test_response_id_mismatch_is_invalid_response(

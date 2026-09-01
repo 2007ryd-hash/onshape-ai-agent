@@ -11,6 +11,7 @@ from onshape_agent.live_transport import (
     LivePolicyDenied,
     OnshapeMcpReadTransport,
 )
+from onshape_agent.mcp_stdio import McpTransportError
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,8 @@ class FakeSession:
         response = self.responses.get(name)
         if callable(response):
             return response(name, arguments)
+        if isinstance(response, Exception):
+            raise response
         return response
 
 
@@ -51,10 +54,12 @@ def documentless_scope() -> OnshapeScope:
     return OnshapeScope()
 
 
-def assert_failed_receipt(receipt: TransportReceipt, code: str) -> None:
+def assert_failed_receipt(
+    receipt: TransportReceipt, code: str, *, network_request_sent: bool = True
+) -> None:
     assert receipt.status == "FAILED"
     assert receipt.error_code == code
-    assert receipt.network_request_sent is True
+    assert receipt.network_request_sent is network_request_sent
     assert receipt.readback_verified is False
 
 
@@ -869,7 +874,7 @@ def test_mcp_transport_error_code_is_stable_and_sanitized(
 
     receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
-    assert_failed_receipt(receipt, "TRANSPORT_FAILED")
+    assert_failed_receipt(receipt, "TRANSPORT_FAILED", network_request_sent=False)
     assert "fake-child-secret" not in receipt.model_dump_json()
 
 
@@ -906,3 +911,40 @@ def test_action_parameters_are_copied_before_dispatch(
         "endpoint": "getDocuments",
         "query_params": {"limit": "5"},
     }
+
+
+def test_live_receipt_uses_mcp_error_network_request_state(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession(
+        {
+            "onshape_api_call": McpTransportError(
+                "TRANSPORT_TIMEOUT", network_request_sent=False
+            )
+        }
+    )
+
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read(
+        "get_document", {}
+    )
+
+    assert_failed_receipt(receipt, "TRANSPORT_TIMEOUT", network_request_sent=False)
+    assert receipt.network_request_sent is False
+
+
+def test_live_receipt_marks_mcp_error_after_write_as_network_sent(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession(
+        {
+            "onshape_api_call": McpTransportError(
+                "TRANSPORT_TIMEOUT", network_request_sent=True
+            )
+        }
+    )
+
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read(
+        "get_document", {}
+    )
+
+    assert_failed_receipt(receipt, "TRANSPORT_TIMEOUT")
