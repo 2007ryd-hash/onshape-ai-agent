@@ -175,6 +175,9 @@ _AUTH_STATUS_SUCCESS_VALUES = frozenset(
 )
 _AUTH_STATUS_FAILURE_VALUES = frozenset(
     {
+        "error",
+        "failed",
+        "failure",
         "invalid",
         "expired",
         "notconfigured",
@@ -227,7 +230,7 @@ class OnshapeMcpReadTransport:
         if not isinstance(scope, OnshapeScope):
             raise LivePolicyDenied("SCOPE_DENIED")
         self._session = session
-        self._scope = scope
+        self._scope = scope.model_copy(deep=True)
         self._last_response: object | None = None
 
     def auth_status(self) -> TransportReceipt:
@@ -241,7 +244,7 @@ class OnshapeMcpReadTransport:
         except Exception as error:
             raise self._map_session_error(error) from None
 
-        response = self._validate_response(response)
+        response = self._validate_response(response, allow_auth_root_status=True)
         auth_error = _auth_status_error_code(response)
         if auth_error is not None:
             raise LiveTransportError(auth_error)
@@ -401,13 +404,17 @@ class OnshapeMcpReadTransport:
         return arguments
 
     @staticmethod
-    def _validate_response(response: object) -> Mapping[str, Any] | list[Any]:
+    def _validate_response(
+        response: object, *, allow_auth_root_status: bool = False
+    ) -> Mapping[str, Any] | list[Any]:
         status_error = _status_error_code(response)
         if status_error is not None:
             raise LiveTransportError(status_error)
         if not isinstance(response, (Mapping, list)):
             raise LiveTransportError("INVALID_RESPONSE")
-        if _contains_error_marker(response):
+        if _contains_error_marker(
+            response, allow_auth_root_status=allow_auth_root_status
+        ):
             raise LiveTransportError("INVALID_RESPONSE")
         return response
 
@@ -425,7 +432,7 @@ class OnshapeMcpReadTransport:
 
         if operation == "body_details":
             bodies = _non_empty_list_field(response, "bodies")
-            if bodies is None:
+            if bodies is None or not _valid_body_details(bodies):
                 raise LiveTransportError("INVALID_RESPONSE")
             return {"body_count": len(bodies)}
 
@@ -436,7 +443,7 @@ class OnshapeMcpReadTransport:
 
         if operation == "mass_properties":
             bodies = _non_empty_mapping_field(response, "bodies")
-            if bodies is None:
+            if bodies is None or not _valid_mass_properties(bodies):
                 raise LiveTransportError("INVALID_RESPONSE")
             return {"body_count": len(bodies)}
 
@@ -614,6 +621,64 @@ def _non_empty_mapping_field(
     return None
 
 
+def _valid_body_details(bodies: list[Any]) -> bool:
+    for body in bodies:
+        if not isinstance(body, Mapping):
+            return False
+        body_id = body.get("id")
+        body_type = body.get("type")
+        if (
+            not isinstance(body_id, str)
+            or not body_id.strip()
+            or not isinstance(body_type, str)
+            or not body_type.strip()
+        ):
+            return False
+    return True
+
+
+def _valid_mass_properties(bodies: Mapping[str, Any]) -> bool:
+    return all(
+        isinstance(body, Mapping) and bool(body) and _contains_finite_number(body)
+        for body in bodies.values()
+    )
+
+
+def _contains_finite_number(
+    value: object, *, _seen: set[int] | None = None, _depth: int = 0
+) -> bool:
+    if _depth > 8:
+        return False
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        try:
+            return isfinite(value)
+        except (OverflowError, TypeError):
+            return False
+    if _seen is None:
+        _seen = set()
+    if isinstance(value, Mapping):
+        marker = id(value)
+        if marker in _seen:
+            return False
+        _seen.add(marker)
+        return any(
+            _contains_finite_number(nested, _seen=_seen, _depth=_depth + 1)
+            for nested in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        marker = id(value)
+        if marker in _seen:
+            return False
+        _seen.add(marker)
+        return any(
+            _contains_finite_number(nested, _seen=_seen, _depth=_depth + 1)
+            for nested in value
+        )
+    return False
+
+
 def _has_numeric_bounds(response: Mapping[str, Any]) -> bool:
     if not _BOUNDS_KEYS.issubset(response):
         return False
@@ -626,7 +691,7 @@ def _has_numeric_bounds(response: Mapping[str, Any]) -> bool:
                 return False
         except (OverflowError, TypeError):
             return False
-    return True
+    return all(response[f"low{axis}"] <= response[f"high{axis}"] for axis in "XYZ")
 
 
 def _map_stable_error_code(code: str) -> str | None:
@@ -746,6 +811,7 @@ def _contains_error_marker(
     *,
     _seen: set[int] | None = None,
     _root: bool = True,
+    allow_auth_root_status: bool = False,
 ) -> bool:
     """Detect error-shaped response nodes without serialising their payload."""
 
@@ -762,18 +828,31 @@ def _contains_error_marker(
             key = _normalise_key(raw_key)
             if key in _ERROR_CONTAINER_NAMES:
                 return True
-            if not _root and key == "status" and _is_error_status_value(nested):
+            if (
+                key == "status"
+                and not (allow_auth_root_status and _root)
+                and _is_error_status_value(nested)
+            ):
                 return True
             if not _root and key == "message" and _is_auth_error_message(nested):
                 return True
             if isinstance(nested, (Mapping, list)) and _contains_error_marker(
-                nested, _seen=_seen, _root=False
+                nested,
+                _seen=_seen,
+                _root=False,
+                allow_auth_root_status=allow_auth_root_status,
             ):
                 return True
         return False
     if isinstance(value, list):
         return any(
-            _contains_error_marker(item, _seen=_seen, _root=False) for item in value
+            _contains_error_marker(
+                item,
+                _seen=_seen,
+                _root=False,
+                allow_auth_root_status=allow_auth_root_status,
+            )
+            for item in value
         )
     return False
 

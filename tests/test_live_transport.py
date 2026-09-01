@@ -172,7 +172,7 @@ def test_document_reads_use_fixed_endpoints_and_scope(
         "get_document": {"id": "doc-123"},
         "list_workspaces": {"items": [{"id": "workspace-456"}]},
         "read_elements": {"items": [{"id": "element-789"}]},
-        "body_details": {"bodies": [{"id": "body-1"}]},
+        "body_details": {"bodies": [{"id": "body-1", "type": "solid"}]},
         "bounding_boxes": {
             "lowX": 0.0,
             "lowY": 0.0,
@@ -181,7 +181,7 @@ def test_document_reads_use_fixed_endpoints_and_scope(
             "highY": 1.0,
             "highZ": 1.0,
         },
-        "mass_properties": {"bodies": {"body-1": {}}},
+        "mass_properties": {"bodies": {"body-1": {"mass": [1.0]}}},
     }
     session = FakeSession({"onshape_api_call": responses[operation]})
 
@@ -209,6 +209,22 @@ def test_endpoint_allowlist_is_private_immutable_and_route_cannot_be_mutated(
 
     assert receipt.status == "SUCCEEDED"
     assert session.last_call.arguments["endpoint"] == "getDocument"
+
+
+def test_transport_uses_a_private_scope_snapshot(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": {"id": "doc-123"}})
+    transport = OnshapeMcpReadTransport(session, scoped_scope)
+
+    scoped_scope.document_id = "other-document"
+    scoped_scope.wvm_id = "other-workspace"
+    scoped_scope.element_id = "other-element"
+
+    receipt = transport.read("get_document", {})
+
+    assert receipt.status == "SUCCEEDED"
+    assert session.last_call.arguments["path_params"] == {"did": "doc-123"}
 
 
 def test_list_documents_uses_fixed_endpoint_and_bounded_limit(
@@ -248,7 +264,7 @@ def test_list_documents_uses_fixed_endpoint_and_bounded_limit(
         ),
         (
             "body_details",
-            {"bodies": [{"id": "body-1"}]},
+            {"bodies": [{"id": "body-1", "type": "solid"}]},
             {"body_count": 1},
         ),
         (
@@ -414,6 +430,139 @@ def test_each_read_rejects_empty_or_missing_invariant(
 
     with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
         OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"bodies": [{"type": "solid"}]},
+        {"bodies": [{"id": "body-1"}]},
+        {"bodies": [{"id": "body-1", "type": ""}]},
+        {"bodies": [None]},
+    ],
+)
+def test_body_details_requires_non_empty_body_id_and_type(
+    response: object,
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+
+    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
+        OnshapeMcpReadTransport(session, scoped_scope).read("body_details", {})
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"bodies": {"body-1": None}},
+        {"bodies": {"body-1": {}}},
+        {"bodies": {"body-1": {"mass": "not-numeric"}}},
+        {"bodies": {"body-1": {"mass": [None]}}},
+    ],
+)
+def test_mass_properties_requires_non_null_numeric_body_values(
+    response: object,
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+
+    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
+        OnshapeMcpReadTransport(session, scoped_scope).read("mass_properties", {})
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {
+            "lowX": 2.0,
+            "lowY": 0.0,
+            "lowZ": 0.0,
+            "highX": 1.0,
+            "highY": 1.0,
+            "highZ": 1.0,
+        },
+        {
+            "lowX": 0.0,
+            "lowY": None,
+            "lowZ": 0.0,
+            "highX": 1.0,
+            "highY": 1.0,
+            "highZ": 1.0,
+        },
+        {
+            "lowX": 0.0,
+            "lowY": 0.0,
+            "lowZ": 0.0,
+            "highX": float("inf"),
+            "highY": 1.0,
+            "highZ": 1.0,
+        },
+    ],
+)
+def test_bounding_boxes_require_finite_non_reversed_axes(
+    response: object,
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+
+    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE"):
+        OnshapeMcpReadTransport(session, scoped_scope).read("bounding_boxes", {})
+
+
+@pytest.mark.parametrize("status", ["active", "ok", "succeeded"])
+def test_root_business_status_allows_valid_collection_response(
+    status: str,
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession(
+        {
+            "onshape_api_call": {
+                "status": status,
+                "items": [{"id": "doc-123"}],
+            }
+        }
+    )
+
+    receipt = OnshapeMcpReadTransport(session, documentless_scope).read(
+        "list_documents", {}
+    )
+
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.evidence_summary == {"item_count": 1}
+
+
+@pytest.mark.parametrize(
+    "status", ["error", "failed", "failure", "unauthorized", "expired"]
+)
+def test_root_error_status_rejects_success_shaped_responses(
+    status: str,
+    scoped_scope: OnshapeScope,
+    documentless_scope: OnshapeScope,
+) -> None:
+    collection_session = FakeSession(
+        {
+            "onshape_api_call": {
+                "status": status,
+                "items": [{"id": "doc-123"}],
+            }
+        }
+    )
+    with pytest.raises(LiveTransportError):
+        OnshapeMcpReadTransport(collection_session, documentless_scope).read(
+            "list_documents", {}
+        )
+
+    document_session = FakeSession(
+        {"onshape_api_call": {"status": status, "id": "doc-123"}}
+    )
+    with pytest.raises(LiveTransportError):
+        OnshapeMcpReadTransport(document_session, scoped_scope).read("get_document", {})
+
+    auth_session = FakeSession(
+        {"onshape_auth_status": {"status": status, "authenticated": True}}
+    )
+    with pytest.raises(LiveTransportError):
+        OnshapeMcpReadTransport(auth_session, OnshapeScope()).auth_status()
 
 
 def test_get_document_missing_id_is_invalid_response_not_verified(
