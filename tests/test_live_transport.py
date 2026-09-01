@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import onshape_agent.live_transport as live_transport
 from onshape_agent.contracts import OnshapeScope, TransportReceipt
 from onshape_agent.live_transport import (
     LivePolicyDenied,
@@ -197,6 +198,19 @@ def test_document_reads_use_fixed_endpoints_and_scope(
     assert receipt.readback_verified is True
 
 
+def test_endpoint_allowlist_is_private_immutable_and_route_cannot_be_mutated(
+    scoped_scope: OnshapeScope,
+) -> None:
+    with pytest.raises(TypeError):
+        live_transport._EXPECTED_ENDPOINTS["get_document"] = "deleteDocument"
+
+    session = FakeSession({"onshape_api_call": {"id": "doc-123"}})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert receipt.status == "SUCCEEDED"
+    assert session.last_call.arguments["endpoint"] == "getDocument"
+
+
 def test_list_documents_uses_fixed_endpoint_and_bounded_limit(
     documentless_scope: OnshapeScope,
 ) -> None:
@@ -298,6 +312,32 @@ def test_collection_reads_accept_empty_collections(
     assert receipt.status == "SUCCEEDED"
     assert receipt.readback_verified is True
     assert receipt.evidence_summary == {"item_count": 0}
+
+
+@pytest.mark.parametrize(
+    "operation", ["list_documents", "list_workspaces", "read_elements"]
+)
+def test_collection_reads_reject_recursive_error_markers_in_top_level_lists(
+    operation: str,
+    scoped_scope: OnshapeScope,
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession(
+        {
+            "onshape_api_call": [
+                {"error": {"message": "private-error"}},
+                {"nested": [{"status": "error"}]},
+                {"nested": [{"message": "private-message"}]},
+            ]
+        }
+    )
+    scope = documentless_scope if operation == "list_documents" else scoped_scope
+
+    with pytest.raises(LiveTransportError, match="INVALID_RESPONSE") as raised:
+        OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+    assert "private-error" not in str(raised.value)
+    assert "private-message" not in str(raised.value)
 
 
 @pytest.mark.parametrize(

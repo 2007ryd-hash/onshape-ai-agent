@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from math import isfinite
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from .contracts import OnshapeScope, TransportReceipt
@@ -36,15 +37,17 @@ class LiveTransportError(McpTransportError):
         super().__init__(code)
 
 
-EXPECTED_ENDPOINTS: dict[str, str] = {
-    "list_documents": "getDocuments",
-    "get_document": "getDocument",
-    "list_workspaces": "getDocumentWorkspaces",
-    "read_elements": "getElementsInDocument",
-    "body_details": "getPartStudioBodyDetails",
-    "bounding_boxes": "getPartStudioBoundingBoxes",
-    "mass_properties": "getPartStudioMassProperties",
-}
+_EXPECTED_ENDPOINTS: Mapping[str, str] = MappingProxyType(
+    {
+        "list_documents": "getDocuments",
+        "get_document": "getDocument",
+        "list_workspaces": "getDocumentWorkspaces",
+        "read_elements": "getElementsInDocument",
+        "body_details": "getPartStudioBodyDetails",
+        "bounding_boxes": "getPartStudioBoundingBoxes",
+        "mass_properties": "getPartStudioMassProperties",
+    }
+)
 
 _DOCUMENT_OPERATIONS = frozenset(
     {
@@ -210,7 +213,7 @@ class OnshapeMcpReadTransport:
     ) -> TransportReceipt:
         """Execute one fixed read operation and return only a safe receipt."""
 
-        if operation not in EXPECTED_ENDPOINTS:
+        if operation not in _EXPECTED_ENDPOINTS:
             raise LivePolicyDenied("OPERATION_DENIED")
         self._validate_scope(operation)
         parameters = self._validate_parameters(operation, safe_parameters)
@@ -330,7 +333,7 @@ class OnshapeMcpReadTransport:
     def _build_arguments(
         self, operation: str, parameters: Mapping[str, object]
     ) -> dict[str, object]:
-        arguments: dict[str, object] = {"endpoint": EXPECTED_ENDPOINTS[operation]}
+        arguments: dict[str, object] = {"endpoint": _EXPECTED_ENDPOINTS[operation]}
         path_params: dict[str, str] = {}
         scope = self._scope
         if operation != "list_documents":
@@ -356,7 +359,7 @@ class OnshapeMcpReadTransport:
             raise LiveTransportError(status_error)
         if not isinstance(response, (Mapping, list)):
             raise LiveTransportError("INVALID_RESPONSE")
-        if isinstance(response, Mapping) and _contains_error_marker(response):
+        if _contains_error_marker(response):
             raise LiveTransportError("INVALID_RESPONSE")
         return response
 
@@ -691,27 +694,39 @@ def _status_value(value: object) -> str | None:
 
 
 def _contains_error_marker(
-    value: Mapping[str, Any], *, _seen: set[int] | None = None
+    value: object,
+    *,
+    _seen: set[int] | None = None,
+    _list_item: bool = False,
 ) -> bool:
+    """Detect error-shaped response nodes without serialising their payload."""
+
     if _seen is None:
         _seen = set()
     marker = id(value)
     if marker in _seen:
         return True
     _seen.add(marker)
-    for raw_key, nested in value.items():
-        if not isinstance(raw_key, str):
-            continue
-        key = _normalise_key(raw_key)
-        if key in _ERROR_CONTAINER_NAMES:
-            return True
-        if isinstance(nested, Mapping) and _contains_error_marker(nested, _seen=_seen):
-            return True
-        if isinstance(nested, list) and any(
-            isinstance(item, Mapping) and _contains_error_marker(item, _seen=_seen)
-            for item in nested
-        ):
-            return True
+    if isinstance(value, Mapping):
+        for raw_key, nested in value.items():
+            if not isinstance(raw_key, str):
+                continue
+            key = _normalise_key(raw_key)
+            if key in _ERROR_CONTAINER_NAMES:
+                return True
+            if _list_item and key in {"status", "message"}:
+                return True
+            if isinstance(nested, (Mapping, list)) and _contains_error_marker(
+                nested,
+                _seen=_seen,
+                _list_item=_list_item,
+            ):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(
+            _contains_error_marker(item, _seen=_seen, _list_item=True) for item in value
+        )
     return False
 
 
