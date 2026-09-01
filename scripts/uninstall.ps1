@@ -56,4 +56,16 @@ if ($RemoveRuntime) {
     $runtime = Join-Path $repoRoot '.venv'
     if (Test-Path -LiteralPath $runtime -PathType Container) { Remove-Item -LiteralPath $runtime -Recurse -Force; $removed += $runtime }
 }
-@{ status = 'UNINSTALLED'; host_target = $HostTarget; removed_paths = @($removed) } | ConvertTo-Json -Depth 4 -Compress
+$appDataRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME 'AppData\Roaming' }
+$localAppDataRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\Local' }
+$preservedPaths = @(
+    (Join-Path $appDataRoot 'onshape-mcp\config.toml'),
+    (Join-Path $localAppDataRoot 'onshape-mcp\tokens.json')
+)
+@{
+    status = 'UNINSTALLED'
+    host_target = $HostTarget
+    removed_paths = @($removed)
+    preserved_paths = $preservedPaths
+    message = 'Upstream onshape-mcp config and tokens are preserved by default.'
+} | ConvertTo-Json -Depth 4 -Compress
