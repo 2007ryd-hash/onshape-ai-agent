@@ -115,6 +115,54 @@ _CODE_KEY_NAMES = frozenset(
 )
 _STATUS_KEY_NAMES = frozenset({"status", "statuscode", "httpstatus", "httpstatuscode"})
 _ERROR_CONTAINER_NAMES = frozenset({"error", "errors", "exception", "failure"})
+_ERROR_STATUS_VALUES = frozenset(
+    {
+        "error",
+        "failed",
+        "failure",
+        "invalid",
+        "expired",
+        "unauthorized",
+        "forbidden",
+        "notfound",
+        "ratelimited",
+        "denied",
+        "rejected",
+        "timeout",
+        "unavailable",
+        "authrequired",
+        "authenticationrequired",
+        "authenticationfailed",
+        "authfailed",
+        "notauthenticated",
+        "notloggedin",
+        "unauthenticated",
+        "loginrequired",
+        "loginfailed",
+        "tokenexpired",
+        "sessionexpired",
+    }
+)
+_AUTH_ERROR_MESSAGE_MARKERS = frozenset(
+    {
+        "authrequired",
+        "authenticationrequired",
+        "authenticationfailed",
+        "authfailed",
+        "unauthorized",
+        "unauthenticated",
+        "notauthenticated",
+        "notloggedin",
+        "loginrequired",
+        "loginfailed",
+        "tokenexpired",
+        "tokenhasexpired",
+        "sessionexpired",
+        "credentialexpired",
+        "invalidtoken",
+        "tokeninvalid",
+    }
+)
 _HTTP_STATUS_TEXT = {
     "unauthorized": "AUTH_REQUIRED",
     "forbidden": "SCOPE_DENIED",
@@ -697,7 +745,7 @@ def _contains_error_marker(
     value: object,
     *,
     _seen: set[int] | None = None,
-    _list_item: bool = False,
+    _root: bool = True,
 ) -> bool:
     """Detect error-shaped response nodes without serialising their payload."""
 
@@ -714,20 +762,55 @@ def _contains_error_marker(
             key = _normalise_key(raw_key)
             if key in _ERROR_CONTAINER_NAMES:
                 return True
-            if _list_item and key in {"status", "message"}:
+            if not _root and key == "status" and _is_error_status_value(nested):
+                return True
+            if not _root and key == "message" and _is_auth_error_message(nested):
                 return True
             if isinstance(nested, (Mapping, list)) and _contains_error_marker(
-                nested,
-                _seen=_seen,
-                _list_item=_list_item,
+                nested, _seen=_seen, _root=False
             ):
                 return True
         return False
     if isinstance(value, list):
         return any(
-            _contains_error_marker(item, _seen=_seen, _list_item=True) for item in value
+            _contains_error_marker(item, _seen=_seen, _root=False) for item in value
         )
     return False
+
+
+def _is_error_status_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value in _STATUS_CODES
+    if not isinstance(value, str):
+        return False
+    compact = _normalise_key(value)
+    if compact in _ERROR_STATUS_VALUES:
+        return True
+    return any(
+        marker in compact
+        for marker in (
+            "expired",
+            "authrequired",
+            "authenticationrequired",
+            "authenticationfailed",
+            "notauthenticated",
+            "notloggedin",
+            "unauthenticated",
+            "loginrequired",
+            "tokenexpired",
+        )
+    )
+
+
+def _is_auth_error_message(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    compact = _normalise_key(value)
+    if compact in _AUTH_ERROR_MESSAGE_MARKERS:
+        return True
+    return any(marker in compact for marker in _AUTH_ERROR_MESSAGE_MARKERS)
 
 
 def _find_document_id(

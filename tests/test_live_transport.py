@@ -315,6 +315,46 @@ def test_collection_reads_accept_empty_collections(
 
 
 @pytest.mark.parametrize(
+    ("operation", "response"),
+    [
+        (
+            "list_documents",
+            [{"id": "doc-123", "status": "active", "message": "description"}],
+        ),
+        (
+            "list_workspaces",
+            {
+                "items": [
+                    {
+                        "id": "workspace-456",
+                        "status": "active",
+                        "message": "description",
+                    }
+                ]
+            },
+        ),
+        (
+            "read_elements",
+            [{"id": "element-789", "status": "active", "message": "description"}],
+        ),
+    ],
+)
+def test_collection_reads_allow_business_status_and_description_message(
+    operation: str,
+    response: object,
+    scoped_scope: OnshapeScope,
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+    scope = documentless_scope if operation == "list_documents" else scoped_scope
+
+    receipt = OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.evidence_summary == {"item_count": 1}
+
+
+@pytest.mark.parametrize(
     "operation", ["list_documents", "list_workspaces", "read_elements"]
 )
 def test_collection_reads_reject_recursive_error_markers_in_top_level_lists(
