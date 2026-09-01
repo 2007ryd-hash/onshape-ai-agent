@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol
 
 from .contracts import (
@@ -18,7 +19,7 @@ from .policy import PolicyDenied, validate_and_order
 class CadTransport(Protocol):
     transport_name: str
 
-    def preflight(self, plan: ExecutionPlan) -> None: ...
+    def preflight(self, actions: Sequence[CadAction]) -> None: ...
 
     def dispatch(self, action: CadAction) -> TransportReceipt: ...
 
@@ -31,8 +32,8 @@ class RecordingTransport:
     def __init__(self) -> None:
         self.calls: list[CadAction] = []
 
-    def preflight(self, plan: ExecutionPlan) -> None:
-        """Accept the already policy-checked offline plan."""
+    def preflight(self, actions: Sequence[CadAction]) -> None:
+        """Accept the already policy-checked offline actions."""
 
     def dispatch(self, action: CadAction) -> TransportReceipt:
         self.calls.append(action)
@@ -57,7 +58,7 @@ class CadGateway:
             return _denied_report(plan, error.code, error.reason, transport_name)
 
         try:
-            self._transport.preflight(plan)
+            self._transport.preflight(ordered)
         except (PolicyDenied, LivePolicyDenied) as error:
             return _denied_report(plan, error.code, error.reason, transport_name)
         except Exception as error:
@@ -103,7 +104,7 @@ class CadGateway:
                 )
 
             receipts.append(receipt)
-            if receipt.operation != action.type:
+            if receipt.operation != _expected_receipt_operation(action):
                 return _failed_report(
                     plan,
                     "TRANSPORT_FAILED",
@@ -204,6 +205,13 @@ def _receipt_error_code(receipt: TransportReceipt) -> str:
     if receipt.error_code in _SAFE_TRANSPORT_CODES:
         return receipt.error_code
     return "TRANSPORT_FAILED"
+
+
+def _expected_receipt_operation(action: CadAction) -> str | None:
+    if action.type != "read_back":
+        return action.type
+    read_kind = action.parameters.get("read_kind")
+    return read_kind if isinstance(read_kind, str) else action.type
 
 
 def _denied_report(

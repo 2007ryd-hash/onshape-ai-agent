@@ -8,12 +8,12 @@ arbitrary MCP arguments.  Every request is assembled from the approved
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from math import isfinite
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from .contracts import OnshapeScope, TransportReceipt
+from .contracts import CadAction, OnshapeScope, TransportReceipt
 from .mcp_stdio import McpTransportError
 
 
@@ -223,7 +223,6 @@ _BOUNDS_KEYS = frozenset({"lowX", "lowY", "lowZ", "highX", "highY", "highZ"})
 class OnshapeMcpReadTransport:
     """Route approved semantic reads through a bounded MCP session."""
 
-    sends_network = True
     transport_name = "onshape-mcp-stdio"
 
     def __init__(self, session: _ToolSession, scope: OnshapeScope) -> None:
@@ -232,6 +231,24 @@ class OnshapeMcpReadTransport:
         self._session = session
         self._scope = scope.model_copy(deep=True)
         self._last_response: object | None = None
+
+    def preflight(self, actions: Sequence[CadAction]) -> None:
+        """Validate every read action without calling the MCP session."""
+
+        if not isinstance(actions, Sequence) or isinstance(
+            actions, (str, bytes, bytearray)
+        ):
+            raise LivePolicyDenied("INVALID_PARAMETERS")
+        for action in actions:
+            self._prepare_action(action)
+
+    def dispatch(self, action: CadAction) -> TransportReceipt:
+        """Dispatch one approved read-back action through the fixed routes."""
+
+        operation, parameters = self._prepare_action(action)
+        if operation == "auth_status":
+            return self.auth_status()
+        return self.read(operation, parameters)
 
     def auth_status(self) -> TransportReceipt:
         """Validate the existing local MCP authentication state."""
@@ -289,6 +306,26 @@ class OnshapeMcpReadTransport:
             readback_verified=True,
             evidence_summary=evidence,
         )
+
+    def _prepare_action(self, action: CadAction) -> tuple[str, dict[str, object]]:
+        if not isinstance(action, CadAction) or action.type != "read_back":
+            raise LivePolicyDenied("OPERATION_DENIED")
+        raw_parameters = action.parameters
+        if not isinstance(raw_parameters, Mapping):
+            raise LivePolicyDenied("INVALID_PARAMETERS")
+        parameters = dict(raw_parameters)
+        read_kind = parameters.pop("read_kind", None)
+        if not isinstance(read_kind, str):
+            raise LivePolicyDenied("INVALID_PARAMETERS")
+        if read_kind == "auth_status":
+            if parameters:
+                raise LivePolicyDenied("INVALID_PARAMETERS")
+            self._validate_scope(read_kind)
+            return read_kind, {}
+        if read_kind not in _EXPECTED_ENDPOINTS:
+            raise LivePolicyDenied("OPERATION_DENIED")
+        self._validate_scope(read_kind)
+        return read_kind, self._validate_parameters(read_kind, parameters)
 
     def _validate_scope(self, operation: str) -> None:
         scope = self._scope

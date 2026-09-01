@@ -13,7 +13,7 @@ from onshape_agent.contracts import (
     ValueStatus,
 )
 from onshape_agent.gateway import CadGateway, RecordingTransport
-from onshape_agent.live_transport import LivePolicyDenied
+from onshape_agent.live_transport import LivePolicyDenied, OnshapeMcpReadTransport
 
 
 def make_plan(*actions: CadAction) -> ExecutionPlan:
@@ -51,11 +51,11 @@ class FakeLiveTransport:
         self.preflight_error = preflight_error
         self.dispatch_error = dispatch_error
         self.sends_network = sends_network
-        self.preflight_plans: list[ExecutionPlan] = []
+        self.preflight_actions: list[list[CadAction]] = []
         self.calls: list[CadAction] = []
 
-    def preflight(self, plan: ExecutionPlan) -> None:
-        self.preflight_plans.append(plan)
+    def preflight(self, actions: list[CadAction]) -> None:
+        self.preflight_actions.append(list(actions))
         if self.preflight_error is not None:
             raise self.preflight_error
 
@@ -64,8 +64,11 @@ class FakeLiveTransport:
         if self.dispatch_error is not None:
             raise self.dispatch_error
         if not self.receipts:
+            read_kind = action.parameters.get("read_kind")
             return TransportReceipt(
-                operation=action.type,
+                operation=(
+                    read_kind if isinstance(read_kind, str) else action.type
+                ),
                 status="SUCCEEDED",
                 network_request_sent=True,
                 readback_verified=True,
@@ -76,9 +79,22 @@ class FakeLiveTransport:
 def read_action(action_id: str = "read_1") -> CadAction:
     return CadAction(
         action_id=action_id,
-        type="get_document",
+        type="read_back",
         semantic_id="document",
+        parameters={"read_kind": "get_document"},
     )
+
+
+class FakeMcpSession:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def call_tool(self, tool_name: str, arguments: dict[str, object]) -> object:
+        self.calls.append((tool_name, dict(arguments)))
+        if not self.responses:
+            raise AssertionError("unexpected MCP call")
+        return self.responses.pop(0)
 
 
 def test_delete_workspace_is_denied_before_transport_dispatch() -> None:
@@ -215,7 +231,7 @@ def test_live_gateway_rejects_invalid_scope_before_transport_preflight() -> None
 
     assert report.status == "DENIED"
     assert report.code == "SCOPE_DENIED"
-    assert transport.preflight_plans == []
+    assert transport.preflight_actions == []
     assert transport.calls == []
 
 
@@ -226,8 +242,76 @@ def test_live_gateway_passes_the_whole_plan_to_transport_preflight() -> None:
     report = CadGateway(transport).execute(plan)
 
     assert report.status == "EXECUTED"
-    assert transport.preflight_plans == [plan]
+    assert transport.preflight_actions == [plan.actions]
     assert [action.action_id for action in transport.calls] == ["read_1", "read_2"]
+
+
+def test_live_gateway_executes_real_read_transport_with_verified_readback() -> None:
+    session = FakeMcpSession([{"id": "document_123", "name": "private"}])
+    transport = OnshapeMcpReadTransport(
+        session,
+        OnshapeScope(document_id="document_123"),
+    )
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "EXECUTED"
+    assert report.execution_mode is ExecutionMode.LIVE
+    assert report.transport_name == "onshape-mcp-stdio"
+    assert report.network_request_sent is True
+    assert report.readback_verified is True
+    assert len(report.receipts) == 1
+    assert session.calls == [
+        (
+            "onshape_api_call",
+            {
+                "endpoint": "getDocument",
+                "path_params": {"did": "document_123"},
+            },
+        )
+    ]
+
+
+def test_real_read_transport_preflights_later_invalid_read_without_mcp_call() -> None:
+    session = FakeMcpSession([{"id": "document_123"}])
+    transport = OnshapeMcpReadTransport(
+        session,
+        OnshapeScope(document_id="document_123"),
+    )
+    invalid_later_read = CadAction(
+        action_id="delete_1",
+        type="read_back",
+        semantic_id="workspace",
+        depends_on=["read_1"],
+        parameters={"read_kind": "delete_workspace"},
+    )
+
+    report = CadGateway(transport).execute(
+        make_live_plan(read_action("read_1"), invalid_later_read)
+    )
+
+    assert report.status == "DENIED"
+    assert report.code == "OPERATION_DENIED"
+    assert session.calls == []
+
+
+def test_real_read_transport_dispatch_rejects_mutating_action() -> None:
+    session = FakeMcpSession([])
+    transport = OnshapeMcpReadTransport(
+        session,
+        OnshapeScope(document_id="document_123"),
+    )
+
+    with pytest.raises(LivePolicyDenied, match="OPERATION_DENIED"):
+        transport.dispatch(
+            CadAction(
+                action_id="sketch_1",
+                type="ensure_sketch",
+                semantic_id="base_sketch",
+            )
+        )
+
+    assert session.calls == []
 
 
 def test_live_gateway_derives_network_status_from_receipts() -> None:

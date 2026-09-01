@@ -33,14 +33,7 @@ ALLOWED_OPERATIONS = frozenset(
 
 LIVE_READ_OPERATIONS = frozenset(
     {
-        "auth_status",
-        "list_documents",
-        "get_document",
-        "list_workspaces",
-        "read_elements",
-        "body_details",
-        "bounding_boxes",
-        "mass_properties",
+        "read_back",
     }
 )
 
