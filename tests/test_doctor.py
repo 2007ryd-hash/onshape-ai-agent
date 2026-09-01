@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from onshape_agent.cli import app
+from onshape_agent.contracts import TransportReceipt
 from onshape_agent.doctor import DoctorCheck, DoctorReport, inspect_installation
 
 runner = CliRunner()
@@ -301,6 +302,58 @@ def test_live_doctor_maps_failed_auth_to_auth_required(
     assert report["status"] == "AUTH_REQUIRED"
     assert report["error_code"] == "AUTH_REQUIRED"
     assert report["network_request_sent"] is True
+
+
+def test_live_doctor_marks_transport_selected_when_offline_checks_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Leave the repository fixture incomplete so the live session must not open.
+    import onshape_agent.live_service as live_service
+
+    def fail_if_called(*_: object, **__: object) -> None:
+        raise AssertionError("live session must not open when base checks fail")
+
+    monkeypatch.setattr(live_service, "open_session", fail_if_called)
+
+    report = inspect_installation(tmp_path, live=True)
+
+    assert report.status == "NOT_READY"
+    assert report.onshape_transport == "onshape-mcp-stdio"
+    assert report.network_request_sent is False
+    assert not any(check.name == "onshape_auth_status" for check in report.checks)
+
+
+@pytest.mark.parametrize(
+    ("network_request_sent", "readback_verified"),
+    [(False, True), (True, False)],
+)
+def test_live_doctor_auth_check_requires_network_and_readback(
+    tmp_path: Path,
+    network_request_sent: bool,
+    readback_verified: bool,
+) -> None:
+    _write_ready_fixture(tmp_path)
+
+    class InconsistentLiveService:
+        def auth_status(self) -> TransportReceipt:
+            return TransportReceipt(
+                operation="auth_status",
+                status="SUCCEEDED",
+                network_request_sent=network_request_sent,
+                readback_verified=readback_verified,
+                evidence_summary={"response_present": True},
+            )
+
+    report = inspect_installation(
+        tmp_path,
+        live=True,
+        live_service=InconsistentLiveService(),
+    )
+
+    assert report.status == "NOT_READY"
+    assert report.onshape_transport == "onshape-mcp-stdio"
+    auth_check = _check(report, "onshape_auth_status")
+    assert auth_check.status == "FAIL"
 
 
 class _FakeLiveSession:

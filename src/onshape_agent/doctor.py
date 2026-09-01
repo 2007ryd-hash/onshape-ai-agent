@@ -253,17 +253,26 @@ def inspect_installation(
         return DoctorReport(status=status, checks=checks)
 
     if not offline_ready:
-        return DoctorReport(status="NOT_READY", checks=checks)
+        return DoctorReport(
+            status="NOT_READY",
+            onshape_transport="onshape-mcp-stdio",
+            checks=checks,
+        )
 
     service = live_service if live_service is not None else LiveService()
     receipt = service.auth_status()
+    probe_succeeded = (
+        receipt.status == "SUCCEEDED"
+        and receipt.network_request_sent
+        and receipt.readback_verified
+    )
     checks.append(
         DoctorCheck(
             name="onshape_auth_status",
-            status="PASS" if receipt.status == "SUCCEEDED" else "FAIL",
+            status="PASS" if probe_succeeded else "FAIL",
             detail=(
                 "validated existing Onshape authentication"
-                if receipt.status == "SUCCEEDED"
+                if probe_succeeded
                 else (
                     "live authentication check failed: "
                     f"{receipt.error_code or 'UNKNOWN'}"
@@ -271,11 +280,7 @@ def inspect_installation(
             ),
         )
     )
-    if (
-        receipt.status == "SUCCEEDED"
-        and receipt.network_request_sent
-        and receipt.readback_verified
-    ):
+    if probe_succeeded:
         status = "READY_LIVE"
     elif receipt.error_code == "AUTH_REQUIRED":
         status = "AUTH_REQUIRED"
