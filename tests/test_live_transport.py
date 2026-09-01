@@ -277,12 +277,35 @@ def test_each_read_accepts_its_minimal_deterministic_invariant(
     ("operation", "response"),
     [
         ("list_documents", []),
-        ("list_documents", {}),
         ("list_documents", {"items": []}),
         ("list_workspaces", []),
         ("list_workspaces", {"items": []}),
         ("read_elements", []),
         ("read_elements", {"items": []}),
+    ],
+)
+def test_collection_reads_accept_empty_collections(
+    operation: str,
+    response: object,
+    scoped_scope: OnshapeScope,
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+    scope = documentless_scope if operation == "list_documents" else scoped_scope
+
+    receipt = OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.readback_verified is True
+    assert receipt.evidence_summary == {"item_count": 0}
+
+
+@pytest.mark.parametrize(
+    ("operation", "response"),
+    [
+        ("list_documents", {}),
+        ("list_workspaces", {}),
+        ("read_elements", {}),
         ("body_details", {}),
         ("body_details", {"bodies": []}),
         ("bounding_boxes", {}),
@@ -538,6 +561,29 @@ def test_api_status_errors_map_to_stable_codes_without_body_leak(
         OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
     assert "fake-child-secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"error": "expired"},
+        {"error": {"code": "auth_required", "payload": "private"}},
+        {"errors": [{"message": "not authenticated", "payload": "private"}]},
+        {"error": {"message": "token expired", "payload": "private"}},
+        {"error": {"message": "token has expired", "payload": "private"}},
+        {"status": "expired", "payload": "private"},
+    ],
+)
+def test_generic_read_auth_aliases_map_to_auth_required_without_body_leak(
+    response: object,
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+
+    with pytest.raises(LiveTransportError, match="AUTH_REQUIRED") as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert "private" not in str(raised.value)
 
 
 @pytest.mark.parametrize(

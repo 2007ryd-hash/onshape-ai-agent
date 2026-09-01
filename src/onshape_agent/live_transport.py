@@ -529,7 +529,7 @@ def _countable_items(
     operation: str, response: Mapping[str, Any] | list[Any]
 ) -> list[Any] | None:
     if isinstance(response, list):
-        return response if response else None
+        return response
     if not isinstance(response, Mapping):
         return None
     # ``items`` is the 0.5.x getDocuments container and a safe common wrapper
@@ -537,7 +537,7 @@ def _countable_items(
     for key in _LIST_CONTAINER_KEYS:
         items = response.get(key)
         if isinstance(items, list):
-            return items if items else None
+            return items
     return None
 
 
@@ -582,7 +582,15 @@ def _map_stable_error_code(code: str) -> str | None:
     normalised = _normalise_key(code)
     aliases = {
         "authrequired": "AUTH_REQUIRED",
+        "authenticationrequired": "AUTH_REQUIRED",
+        "authexpired": "AUTH_REQUIRED",
+        "expired": "AUTH_REQUIRED",
+        "loginrequired": "AUTH_REQUIRED",
+        "notauthenticated": "AUTH_REQUIRED",
+        "notloggedin": "AUTH_REQUIRED",
         "unauthorized": "AUTH_REQUIRED",
+        "unauthenticated": "AUTH_REQUIRED",
+        "tokenexpired": "AUTH_REQUIRED",
         "scopedenied": "SCOPE_DENIED",
         "forbidden": "SCOPE_DENIED",
         "notfound": "NOT_FOUND",
@@ -628,9 +636,7 @@ def _status_error_code(value: object) -> str | None:
                     mapped = visit(nested, in_error=True, depth=depth + 1)
                     if mapped is not None:
                         return mapped
-                elif isinstance(nested, (Mapping, list, tuple)) and (
-                    in_error or key in _ERROR_CONTAINER_NAMES
-                ):
+                elif in_error:
                     mapped = visit(nested, in_error=True, depth=depth + 1)
                     if mapped is not None:
                         return mapped
@@ -663,6 +669,19 @@ def _status_value(value: object) -> str | None:
         }:
             return mapped
         compact = _normalise_key(value)
+        if any(
+            marker in compact
+            for marker in (
+                "expired",
+                "authrequired",
+                "authenticationrequired",
+                "notauthenticated",
+                "notloggedin",
+                "unauthenticated",
+                "loginrequired",
+            )
+        ):
+            return "AUTH_REQUIRED"
         if compact in _HTTP_STATUS_TEXT:
             return _HTTP_STATUS_TEXT[compact]
         match = re.search(r"\b(401|403|404|429)\b", value)
