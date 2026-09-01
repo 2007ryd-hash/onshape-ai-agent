@@ -1,0 +1,444 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+
+from onshape_agent.contracts import OnshapeScope, TransportReceipt
+from onshape_agent.live_transport import (
+    LivePolicyDenied,
+    LiveTransportError,
+    OnshapeMcpReadTransport,
+)
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    name: str
+    arguments: dict[str, object]
+
+
+class FakeSession:
+    def __init__(self, responses: dict[str, object] | None = None) -> None:
+        self.responses = responses or {}
+        self.calls: list[ToolCall] = []
+
+    @property
+    def last_call(self) -> ToolCall:
+        return self.calls[-1]
+
+    def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        self.calls.append(ToolCall(name, arguments))
+        response = self.responses.get(name)
+        if callable(response):
+            return response(name, arguments)
+        return response
+
+
+@pytest.fixture
+def scoped_scope() -> OnshapeScope:
+    return OnshapeScope(
+        document_id="doc-123",
+        wvm="w",
+        wvm_id="workspace-456",
+        element_id="element-789",
+    )
+
+
+@pytest.fixture
+def documentless_scope() -> OnshapeScope:
+    return OnshapeScope()
+
+
+def test_auth_status_forces_validation_and_returns_safe_receipt() -> None:
+    session = FakeSession({"onshape_auth_status": {"authenticated": True}})
+
+    receipt = OnshapeMcpReadTransport(session, OnshapeScope()).auth_status()
+
+    assert session.last_call == ToolCall("onshape_auth_status", {"validate": True})
+    assert isinstance(receipt, TransportReceipt)
+    assert receipt.operation == "auth_status"
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.network_request_sent is True
+    assert receipt.readback_verified is True
+    assert receipt.evidence_summary == {"response_present": True}
+
+
+@pytest.mark.parametrize(
+    ("operation", "endpoint", "expected_path"),
+    [
+        ("get_document", "getDocument", {"did": "doc-123"}),
+        (
+            "list_workspaces",
+            "getDocumentWorkspaces",
+            {"did": "doc-123"},
+        ),
+        (
+            "read_elements",
+            "getElementsInDocument",
+            {"did": "doc-123", "wvm": "w", "wvmid": "workspace-456"},
+        ),
+        (
+            "body_details",
+            "getPartStudioBodyDetails",
+            {
+                "did": "doc-123",
+                "wvm": "w",
+                "wvmid": "workspace-456",
+                "eid": "element-789",
+            },
+        ),
+        (
+            "bounding_boxes",
+            "getPartStudioBoundingBoxes",
+            {
+                "did": "doc-123",
+                "wvm": "w",
+                "wvmid": "workspace-456",
+                "eid": "element-789",
+            },
+        ),
+        (
+            "mass_properties",
+            "getPartStudioMassProperties",
+            {
+                "did": "doc-123",
+                "wvm": "w",
+                "wvmid": "workspace-456",
+                "eid": "element-789",
+            },
+        ),
+    ],
+)
+def test_document_reads_use_fixed_endpoints_and_scope(
+    operation: str,
+    endpoint: str,
+    expected_path: dict[str, str],
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": {"id": "doc-123"}})
+
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read(operation, {})
+
+    assert session.last_call == ToolCall(
+        "onshape_api_call",
+        {"endpoint": endpoint, "path_params": expected_path},
+    )
+    assert isinstance(receipt, TransportReceipt)
+    assert receipt.operation == operation
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.network_request_sent is True
+    assert receipt.readback_verified is True
+
+
+def test_list_documents_uses_fixed_endpoint_and_bounded_limit(
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": []})
+
+    receipt = OnshapeMcpReadTransport(session, documentless_scope).read(
+        "list_documents", {"limit": 7}
+    )
+
+    assert session.last_call == ToolCall(
+        "onshape_api_call",
+        {"endpoint": "getDocuments", "query_params": {"limit": "7"}},
+    )
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.readback_verified is True
+
+
+@pytest.mark.parametrize("limit", [1, 100])
+def test_list_documents_accepts_inclusive_limit_bounds(
+    limit: int, documentless_scope: OnshapeScope
+) -> None:
+    session = FakeSession({"onshape_api_call": []})
+
+    OnshapeMcpReadTransport(session, documentless_scope).read(
+        "list_documents", {"limit": limit}
+    )
+
+    assert session.last_call.arguments["query_params"] == {"limit": str(limit)}
+
+
+@pytest.mark.parametrize("limit", [0, 101, True, "10", 1.5])
+def test_list_documents_rejects_out_of_range_or_non_integer_limit(
+    limit: object, documentless_scope: OnshapeScope
+) -> None:
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="INVALID_PARAMETERS"):
+        OnshapeMcpReadTransport(session, documentless_scope).read(
+            "list_documents", {"limit": limit}
+        )
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("operation", ["delete_workspace", "raw_http", "create_sketch"])
+def test_unknown_or_mutating_operation_is_denied_before_mcp_call(
+    operation: str, scoped_scope: OnshapeScope
+) -> None:
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="OPERATION_DENIED"):
+        OnshapeMcpReadTransport(session, scoped_scope).read(operation, {})
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "unsafe_key",
+    [
+        "endpoint",
+        "url",
+        "method",
+        "body",
+        "header_params",
+        "file_refs",
+        "auth",
+        "login",
+        "auth_login",
+    ],
+)
+def test_raw_transport_overrides_and_auth_inputs_are_denied(
+    unsafe_key: str, scoped_scope: OnshapeScope
+) -> None:
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="OPERATION_DENIED") as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read(
+            "get_document", {unsafe_key: "fake-child-secret"}
+        )
+
+    assert session.calls == []
+    assert "fake-child-secret" not in str(raised.value)
+
+
+def test_nested_raw_transport_override_is_denied_without_echoing_body(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession()
+    parameters = {"options": {"body": {"secret": "fake-child-secret"}}}
+
+    with pytest.raises(LivePolicyDenied, match="OPERATION_DENIED") as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", parameters)
+
+    assert session.calls == []
+    assert "fake-child-secret" not in str(raised.value)
+
+
+def test_documentless_scope_cannot_dispatch_document_reads(
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="SCOPE_DENIED"):
+        OnshapeMcpReadTransport(session, documentless_scope).read("get_document", {})
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "parameters"),
+    [
+        ("get_document", {"document_id": "other-document"}),
+        ("read_elements", {"wvm_id": "other-workspace"}),
+        ("body_details", {"element_id": "other-element"}),
+    ],
+)
+def test_caller_identifiers_must_match_approved_scope(
+    operation: str,
+    parameters: dict[str, object],
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="SCOPE_DENIED"):
+        OnshapeMcpReadTransport(session, scoped_scope).read(operation, parameters)
+
+    assert session.calls == []
+
+
+def test_unknown_safe_parameter_is_denied_before_dispatch(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="INVALID_PARAMETERS"):
+        OnshapeMcpReadTransport(session, scoped_scope).read(
+            "get_document", {"unexpected": "value"}
+        )
+
+    assert session.calls == []
+
+
+def test_invalid_wvm_is_denied_at_transport_boundary(
+    scoped_scope: OnshapeScope,
+) -> None:
+    invalid_scope = OnshapeScope.model_construct(
+        stack="cad.onshape.com",
+        document_id="doc-123",
+        wvm="x",
+        wvm_id="workspace-456",
+        element_id="element-789",
+    )
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="SCOPE_DENIED"):
+        OnshapeMcpReadTransport(session, invalid_scope).read("read_elements", {})
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["read_elements", "body_details", "bounding_boxes", "mass_properties"],
+)
+def test_versioned_reads_require_complete_wvm_scope(
+    operation: str,
+) -> None:
+    session = FakeSession()
+    scope = OnshapeScope(document_id="doc-123")
+
+    with pytest.raises(LivePolicyDenied, match="SCOPE_DENIED"):
+        OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["body_details", "bounding_boxes", "mass_properties"],
+)
+def test_body_reads_require_element_scope(operation: str) -> None:
+    session = FakeSession()
+    scope = OnshapeScope(document_id="doc-123", wvm="w", wvm_id="workspace-456")
+
+    with pytest.raises(LivePolicyDenied, match="SCOPE_DENIED"):
+        OnshapeMcpReadTransport(session, scope).read(operation, {})
+
+    assert session.calls == []
+
+
+def test_get_document_requires_matching_id_in_response(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession(
+        {"onshape_api_call": {"id": "other-document", "secret": "private"}}
+    )
+
+    with pytest.raises(LiveTransportError, match="VERIFICATION_FAILED") as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert "other-document" not in str(raised.value)
+    assert "private" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (401, "AUTH_REQUIRED"),
+        (403, "SCOPE_DENIED"),
+        (404, "NOT_FOUND"),
+        (429, "RATE_LIMITED"),
+    ],
+)
+def test_api_status_errors_map_to_stable_codes_without_body_leak(
+    status: int,
+    expected_code: str,
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession(
+        {
+            "onshape_api_call": {
+                "status_code": status,
+                "body": {"secret": "fake-child-secret"},
+            }
+        }
+    )
+
+    with pytest.raises(LiveTransportError, match=expected_code) as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert "fake-child-secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "response", [None, "not-json", {"error": {"secret": "private"}}]
+)
+def test_invalid_or_error_response_is_sanitized(
+    response: object, scoped_scope: OnshapeScope
+) -> None:
+    session = FakeSession({"onshape_api_call": response})
+
+    with pytest.raises(LiveTransportError) as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert raised.value.code == "INVALID_RESPONSE"
+    assert "private" not in str(raised.value)
+
+
+def test_transport_receipt_contains_no_private_response_body(
+    scoped_scope: OnshapeScope,
+) -> None:
+    session = FakeSession(
+        {"onshape_api_call": {"id": "doc-123", "description": "private"}}
+    )
+
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert "private" not in receipt.model_dump_json()
+    assert receipt.evidence_summary == {"document_id_matches": True}
+
+
+def test_mcp_transport_error_code_is_stable_and_sanitized(
+    scoped_scope: OnshapeScope,
+) -> None:
+    class FailingSession(FakeSession):
+        def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+            self.calls.append(ToolCall(name, arguments))
+            raise RuntimeError("fake-child-secret")
+
+    session = FailingSession()
+
+    with pytest.raises(LiveTransportError, match="TRANSPORT_FAILED") as raised:
+        OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
+
+    assert "fake-child-secret" not in str(raised.value)
+
+
+def test_scope_stack_is_fixed_to_cad_onshape_com(
+    scoped_scope: OnshapeScope,
+) -> None:
+    invalid_scope = OnshapeScope.model_construct(
+        stack="example.onshape.com",
+        document_id="doc-123",
+        wvm="w",
+        wvm_id="workspace-456",
+        element_id="element-789",
+    )
+    session = FakeSession()
+
+    with pytest.raises(LivePolicyDenied, match="SCOPE_DENIED"):
+        OnshapeMcpReadTransport(session, invalid_scope).read("get_document", {})
+
+    assert session.calls == []
+
+
+def test_action_parameters_are_copied_before_dispatch(
+    documentless_scope: OnshapeScope,
+) -> None:
+    session = FakeSession({"onshape_api_call": []})
+    parameters: dict[str, Any] = {"limit": 5}
+
+    OnshapeMcpReadTransport(session, documentless_scope).read(
+        "list_documents", parameters
+    )
+    parameters["limit"] = 99
+
+    assert session.last_call.arguments == {
+        "endpoint": "getDocuments",
+        "query_params": {"limit": "5"},
+    }
