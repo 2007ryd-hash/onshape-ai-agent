@@ -232,3 +232,88 @@ def test_doctor_models_are_strict() -> None:
         )
     with pytest.raises(ValidationError):
         DoctorReport(status="READY_OFFLINE", provider_api_key_required=True)
+
+
+def test_default_doctor_never_constructs_live_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_ready_fixture(tmp_path)
+    import onshape_agent.live_service as live_service
+
+    def fail_if_called(*_: object, **__: object) -> None:
+        raise AssertionError("offline doctor must not construct a live session")
+
+    monkeypatch.setattr(live_service, "open_session", fail_if_called)
+
+    result = runner.invoke(
+        app, ["doctor", "--json", "--repo-root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["status"] == "READY_OFFLINE"
+    assert report["network_request_sent"] is False
+    assert report["onshape_transport"] == "not_configured"
+
+
+def test_live_doctor_uses_validated_probe_and_returns_ready_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_ready_fixture(tmp_path)
+    from onshape_agent.live_service import LiveService
+
+    session = _FakeLiveSession({"onshape_auth_status": {"authenticated": True}})
+    monkeypatch.setattr(
+        "onshape_agent.live_service.open_session", lambda: session
+    )
+
+    result = runner.invoke(
+        app,
+        ["doctor", "--live", "--json", "--repo-root", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["status"] == "READY_LIVE"
+    assert report["network_request_sent"] is True
+    assert report["onshape_transport"] == "onshape-mcp-stdio"
+    assert session.calls == [("onshape_auth_status", {"validate": True})]
+    assert "private" not in result.stdout
+    assert LiveService is not None
+
+
+def test_live_doctor_maps_failed_auth_to_auth_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_ready_fixture(tmp_path)
+    session = _FakeLiveSession({"onshape_auth_status": {"status": "invalid"}})
+    monkeypatch.setattr(
+        "onshape_agent.live_service.open_session", lambda: session
+    )
+
+    result = runner.invoke(
+        app,
+        ["doctor", "--live", "--json", "--repo-root", str(tmp_path)],
+    )
+
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert report["status"] == "AUTH_REQUIRED"
+    assert report["error_code"] == "AUTH_REQUIRED"
+    assert report["network_request_sent"] is True
+
+
+class _FakeLiveSession:
+    def __init__(self, responses: dict[str, object]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def __enter__(self) -> "_FakeLiveSession":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        self.calls.append((name, arguments))
+        return self.responses[name]

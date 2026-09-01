@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from .contracts import StrictModel
+from .live_service import LiveService
 
 
 class DoctorCheck(StrictModel):
@@ -23,9 +24,14 @@ class DoctorCheck(StrictModel):
 class DoctorReport(StrictModel):
     """Machine-readable installation status."""
 
-    status: Literal["READY_OFFLINE", "NOT_READY"]
+    status: Literal["READY_OFFLINE", "READY_LIVE", "AUTH_REQUIRED", "NOT_READY"]
     provider_api_key_required: Literal[False] = False
-    onshape_transport: Literal["not_configured"] = "not_configured"
+    onshape_transport: Literal["not_configured", "onshape-mcp-stdio"] = (
+        "not_configured"
+    )
+    network_request_sent: bool = False
+    readback_verified: bool = False
+    error_code: str | None = None
     checks: list[DoctorCheck]
 
 
@@ -180,7 +186,13 @@ def _output_check(output_root: Path) -> DoctorCheck:
     return DoctorCheck(name="output_directory", status="PASS", detail=detail)
 
 
-def _transport_check() -> DoctorCheck:
+def _transport_check(*, live: bool = False) -> DoctorCheck:
+    if live:
+        return DoctorCheck(
+            name="onshape_transport",
+            status="PASS",
+            detail="pinned onshape-mcp stdio transport selected explicitly",
+        )
     return DoctorCheck(
         name="onshape_transport",
         status="PASS",
@@ -192,8 +204,14 @@ def inspect_installation(
     repo_root: Path | str,
     *,
     output_root: Path | str | None = None,
+    live: bool = False,
+    live_service: LiveService | None = None,
 ) -> DoctorReport:
-    """Inspect the repository and runtime without accessing credentials."""
+    """Inspect the local installation, optionally probing an explicit live session.
+
+    The default path remains entirely offline.  ``live=True`` is the only path
+    that constructs a session and asks the upstream MCP to validate auth.
+    """
 
     root = Path(repo_root)
     output = Path(output_root) if output_root is not None else root / "runs"
@@ -227,11 +245,47 @@ def inspect_installation(
             parse_json=True,
         ),
         _output_check(output),
-        _transport_check(),
+        _transport_check(live=live),
     ]
-    status = (
-        "READY_OFFLINE"
-        if all(check.status == "PASS" for check in checks)
-        else "NOT_READY"
+    offline_ready = all(check.status == "PASS" for check in checks)
+    if not live:
+        status = "READY_OFFLINE" if offline_ready else "NOT_READY"
+        return DoctorReport(status=status, checks=checks)
+
+    if not offline_ready:
+        return DoctorReport(status="NOT_READY", checks=checks)
+
+    service = live_service if live_service is not None else LiveService()
+    receipt = service.auth_status()
+    checks.append(
+        DoctorCheck(
+            name="onshape_auth_status",
+            status="PASS" if receipt.status == "SUCCEEDED" else "FAIL",
+            detail=(
+                "validated existing Onshape authentication"
+                if receipt.status == "SUCCEEDED"
+                else (
+                    "live authentication check failed: "
+                    f"{receipt.error_code or 'UNKNOWN'}"
+                )
+            ),
+        )
     )
-    return DoctorReport(status=status, checks=checks)
+    if (
+        receipt.status == "SUCCEEDED"
+        and receipt.network_request_sent
+        and receipt.readback_verified
+    ):
+        status = "READY_LIVE"
+    elif receipt.error_code == "AUTH_REQUIRED":
+        status = "AUTH_REQUIRED"
+    else:
+        status = "NOT_READY"
+    return DoctorReport(
+        status=status,
+        onshape_transport="onshape-mcp-stdio",
+        network_request_sent=receipt.network_request_sent,
+        readback_verified=receipt.readback_verified,
+        error_code=receipt.error_code,
+        checks=checks,
+    )
