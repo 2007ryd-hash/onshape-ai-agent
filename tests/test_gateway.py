@@ -3,8 +3,17 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from onshape_agent.contracts import CadAction, DesignValue, ExecutionPlan, ValueStatus
+from onshape_agent.contracts import (
+    CadAction,
+    DesignValue,
+    ExecutionMode,
+    ExecutionPlan,
+    OnshapeScope,
+    TransportReceipt,
+    ValueStatus,
+)
 from onshape_agent.gateway import CadGateway, RecordingTransport
+from onshape_agent.live_transport import LivePolicyDenied
 
 
 def make_plan(*actions: CadAction) -> ExecutionPlan:
@@ -13,6 +22,62 @@ def make_plan(*actions: CadAction) -> ExecutionPlan:
         approved_design_hash="sha256:approved",
         target_scope="sandbox",
         actions=list(actions),
+    )
+
+
+def make_live_plan(*actions: CadAction) -> ExecutionPlan:
+    return ExecutionPlan(
+        plan_id="live_plan_1",
+        approved_design_hash="sha256:approved",
+        target_scope="sandbox",
+        execution_mode=ExecutionMode.LIVE,
+        onshape_scope=OnshapeScope(document_id="document_123"),
+        actions=list(actions),
+    )
+
+
+class FakeLiveTransport:
+    transport_name = "fake-live"
+
+    def __init__(
+        self,
+        receipts: list[TransportReceipt] | None = None,
+        *,
+        preflight_error: Exception | None = None,
+        dispatch_error: Exception | None = None,
+        sends_network: bool = True,
+    ) -> None:
+        self.receipts = list(receipts or [])
+        self.preflight_error = preflight_error
+        self.dispatch_error = dispatch_error
+        self.sends_network = sends_network
+        self.preflight_plans: list[ExecutionPlan] = []
+        self.calls: list[CadAction] = []
+
+    def preflight(self, plan: ExecutionPlan) -> None:
+        self.preflight_plans.append(plan)
+        if self.preflight_error is not None:
+            raise self.preflight_error
+
+    def dispatch(self, action: CadAction) -> TransportReceipt:
+        self.calls.append(action)
+        if self.dispatch_error is not None:
+            raise self.dispatch_error
+        if not self.receipts:
+            return TransportReceipt(
+                operation=action.type,
+                status="SUCCEEDED",
+                network_request_sent=True,
+                readback_verified=True,
+            )
+        return self.receipts.pop(0)
+
+
+def read_action(action_id: str = "read_1") -> CadAction:
+    return CadAction(
+        action_id=action_id,
+        type="get_document",
+        semantic_id="document",
     )
 
 
@@ -95,6 +160,200 @@ def test_allowlisted_actions_reach_recording_transport_in_dependency_order() -> 
     assert report.status == "EXECUTED"
     assert [call.action_id for call in transport.calls] == ["sketch_1", "extrude_1"]
     assert report.network_request_sent is False
+
+
+def test_recording_transport_returns_a_typed_simulated_receipt() -> None:
+    transport = RecordingTransport()
+
+    receipt = transport.dispatch(
+        CadAction(
+            action_id="sketch_1",
+            type="ensure_sketch",
+            semantic_id="base_sketch",
+        )
+    )
+
+    assert isinstance(receipt, TransportReceipt)
+    assert receipt.operation == "ensure_sketch"
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.network_request_sent is False
+
+
+def test_live_gateway_preflights_entire_plan_before_first_request() -> None:
+    transport = FakeLiveTransport()
+    report = CadGateway(transport).execute(
+        make_live_plan(
+            read_action("read_1"),
+            CadAction(
+                action_id="delete_1",
+                type="delete_workspace",
+                semantic_id="workspace",
+            ),
+        )
+    )
+
+    assert report.status == "DENIED"
+    assert transport.calls == []
+
+
+def test_live_gateway_rejects_invalid_scope_before_transport_preflight() -> None:
+    transport = FakeLiveTransport()
+    invalid_scope = OnshapeScope.model_construct(
+        stack="enterprise.onshape.com",
+        document_id="document_123",
+    )
+    plan = ExecutionPlan(
+        plan_id="live_plan_1",
+        approved_design_hash="sha256:approved",
+        target_scope="onshape",
+        execution_mode=ExecutionMode.LIVE,
+        onshape_scope=invalid_scope,
+        actions=[read_action()],
+    )
+
+    report = CadGateway(transport).execute(plan)
+
+    assert report.status == "DENIED"
+    assert report.code == "SCOPE_DENIED"
+    assert transport.preflight_plans == []
+    assert transport.calls == []
+
+
+def test_live_gateway_passes_the_whole_plan_to_transport_preflight() -> None:
+    transport = FakeLiveTransport()
+    plan = make_live_plan(read_action("read_1"), read_action("read_2"))
+
+    report = CadGateway(transport).execute(plan)
+
+    assert report.status == "EXECUTED"
+    assert transport.preflight_plans == [plan]
+    assert [action.action_id for action in transport.calls] == ["read_1", "read_2"]
+
+
+def test_live_gateway_derives_network_status_from_receipts() -> None:
+    transport = FakeLiveTransport(
+        receipts=[
+            TransportReceipt(
+                operation="get_document",
+                status="SUCCEEDED",
+                network_request_sent=True,
+                readback_verified=True,
+            )
+        ],
+        sends_network=False,
+    )
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "EXECUTED"
+    assert report.network_request_sent is True
+
+
+def test_live_gateway_requires_verified_readback() -> None:
+    transport = FakeLiveTransport(
+        receipts=[
+            TransportReceipt(
+                operation="get_document",
+                status="SUCCEEDED",
+                network_request_sent=True,
+                readback_verified=False,
+            )
+        ]
+    )
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "FAILED"
+    assert report.code == "VERIFICATION_FAILED"
+
+
+def test_live_gateway_requires_every_receipt_to_be_successful_and_verified() -> None:
+    transport = FakeLiveTransport(
+        receipts=[
+            TransportReceipt(
+                operation="get_document",
+                status="SUCCEEDED",
+                network_request_sent=True,
+                readback_verified=True,
+            ),
+            TransportReceipt(
+                operation="get_document",
+                status="FAILED",
+                network_request_sent=True,
+                readback_verified=False,
+                error_code="INVALID_RESPONSE",
+            ),
+        ]
+    )
+
+    report = CadGateway(transport).execute(
+        make_live_plan(read_action("read_1"), read_action("read_2"))
+    )
+
+    assert report.status == "FAILED"
+    assert report.code == "INVALID_RESPONSE"
+    assert report.network_request_sent is True
+
+
+def test_transport_exception_maps_to_sanitized_failed_report() -> None:
+    transport = FakeLiveTransport(
+        dispatch_error=RuntimeError("Authorization Bearer super-secret-token")
+    )
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "FAILED"
+    assert report.code == "TRANSPORT_FAILED"
+    assert "super-secret-token" not in report.model_dump_json()
+
+
+def test_transport_preflight_exception_prevents_dispatch() -> None:
+    transport = FakeLiveTransport(
+        preflight_error=RuntimeError("private server response")
+    )
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "FAILED"
+    assert report.code == "TRANSPORT_FAILED"
+    assert transport.calls == []
+
+
+def test_live_policy_preflight_error_is_denied_without_dispatch() -> None:
+    transport = FakeLiveTransport(
+        preflight_error=LivePolicyDenied("SCOPE_DENIED", "private scope details")
+    )
+
+    report = CadGateway(transport).execute(make_live_plan(read_action()))
+
+    assert report.status == "DENIED"
+    assert report.code == "SCOPE_DENIED"
+    assert transport.calls == []
+
+
+def test_gateway_rejects_untyped_transport_receipts_without_an_adapter() -> None:
+    class LegacyTransport:
+        transport_name = "legacy"
+
+        def preflight(self, plan: ExecutionPlan) -> None:
+            return None
+
+        def dispatch(self, action: CadAction) -> dict[str, object]:
+            return {"status": "RECORDED", "action_id": action.action_id}
+
+    report = CadGateway(LegacyTransport()).execute(
+        make_plan(
+            CadAction(
+                action_id="sketch_1",
+                type="ensure_sketch",
+                semantic_id="base_sketch",
+            )
+        )
+    )
+
+    assert report.status == "FAILED"
+    assert report.code == "TRANSPORT_FAILED"
+    assert report.receipts == []
 
 
 def test_execution_plan_requires_approval_hash() -> None:

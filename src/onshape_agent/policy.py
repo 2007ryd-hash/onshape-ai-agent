@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .contracts import CadAction, ExecutionPlan, ValueStatus
+from .contracts import (
+    CadAction,
+    ExecutionMode,
+    ExecutionPlan,
+    OnshapeScope,
+    ValueStatus,
+)
 
 ALLOWED_OPERATIONS = frozenset(
     {
@@ -25,6 +31,19 @@ ALLOWED_OPERATIONS = frozenset(
     }
 )
 
+LIVE_READ_OPERATIONS = frozenset(
+    {
+        "auth_status",
+        "list_documents",
+        "get_document",
+        "list_workspaces",
+        "read_elements",
+        "body_details",
+        "bounding_boxes",
+        "mass_properties",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyDenied(Exception):
@@ -35,6 +54,20 @@ class PolicyDenied(Exception):
 def validate_and_order(plan: ExecutionPlan) -> list[CadAction]:
     """Validate an entire plan before returning a dependency-safe order."""
 
+    if plan.execution_mode is ExecutionMode.LIVE and plan.onshape_scope is None:
+        raise PolicyDenied(
+            "SCOPE_DENIED",
+            "Live execution requires an approved Onshape scope.",
+        )
+    if plan.execution_mode is ExecutionMode.LIVE:
+        _validate_live_scope(plan.onshape_scope)
+
+    allowed_operations = (
+        LIVE_READ_OPERATIONS
+        if plan.execution_mode is ExecutionMode.LIVE
+        else ALLOWED_OPERATIONS
+    )
+
     for assumption in plan.assumptions:
         if assumption.status is ValueStatus.ASSUMPTION and not assumption.approved:
             raise PolicyDenied(
@@ -43,10 +76,10 @@ def validate_and_order(plan: ExecutionPlan) -> list[CadAction]:
             )
 
     for action in plan.actions:
-        if action.type not in ALLOWED_OPERATIONS:
+        if action.type not in allowed_operations:
             raise PolicyDenied(
                 "OPERATION_NOT_ALLOWED",
-                f"{action.type} is not in the V1 operation allowlist.",
+                "Action is not in the operation allowlist for this execution mode.",
             )
 
     by_id = {action.action_id: action for action in plan.actions}
@@ -82,3 +115,22 @@ def validate_and_order(plan: ExecutionPlan) -> list[CadAction]:
     if len(ordered) != len(plan.actions):
         raise PolicyDenied("ACTION_CYCLE", "Action dependencies contain a cycle.")
     return ordered
+
+
+def _validate_live_scope(scope: OnshapeScope | None) -> None:
+    if not isinstance(scope, OnshapeScope):
+        raise PolicyDenied("SCOPE_DENIED", "Live execution requires an Onshape scope.")
+    if scope.stack != "cad.onshape.com":
+        raise PolicyDenied("SCOPE_DENIED", "Live execution is restricted to Onshape.")
+    for identifier in (scope.document_id, scope.wvm_id, scope.element_id):
+        if identifier is not None and (
+            not isinstance(identifier, str) or not identifier
+        ):
+            raise PolicyDenied("SCOPE_DENIED", "Onshape scope identifiers are invalid.")
+    if scope.wvm not in {None, "w", "v", "m"}:
+        raise PolicyDenied("SCOPE_DENIED", "Onshape scope version kind is invalid.")
+    if (scope.wvm is None) != (scope.wvm_id is None):
+        raise PolicyDenied(
+            "SCOPE_DENIED",
+            "Onshape scope requires both a version kind and identifier.",
+        )

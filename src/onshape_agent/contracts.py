@@ -141,7 +141,7 @@ class ExecutionPlan(StrictModel):
     schema_version: str = "1.0"
     plan_id: str = Field(min_length=1)
     approved_design_hash: str = Field(min_length=1)
-    target_scope: Literal["sandbox"]
+    target_scope: Literal["sandbox", "onshape"]
     execution_mode: ExecutionMode = ExecutionMode.SIMULATED
     onshape_scope: OnshapeScope | None = None
     assumptions: list[DesignValue] = Field(default_factory=list)
@@ -150,11 +150,15 @@ class ExecutionPlan(StrictModel):
 
 class GatewayReport(StrictModel):
     plan_id: str
-    status: Literal["DENIED", "EXECUTED"]
+    status: Literal["DENIED", "EXECUTED", "FAILED"]
     code: str
     reason: str
     network_request_sent: bool
+    execution_mode: ExecutionMode = ExecutionMode.SIMULATED
+    transport_name: str = Field(default="unknown", min_length=1)
+    readback_verified: bool = False
     executed_action_ids: list[str] = Field(default_factory=list)
+    receipts: list[TransportReceipt] = Field(default_factory=list)
 
 
 class Diagnosis(StrictModel):
