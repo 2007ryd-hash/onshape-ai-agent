@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
+import os
+import re
+import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -21,7 +27,7 @@ def fake_mcp_command() -> list[str]:
 
 
 def command_for(
-    fake_mcp_command: list[str], scenario: str, trace_path: Path
+    fake_mcp_command: list[str], scenario: str, trace_path: Path, *extra: str
 ) -> list[str]:
     return [
         *fake_mcp_command,
@@ -29,11 +35,60 @@ def command_for(
         scenario,
         "--trace",
         str(trace_path),
+        *extra,
     ]
 
 
 def read_trace(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def wait_for_path(path: Path, timeout_seconds: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {path.name}")
+
+
+def wait_for_tool_call(
+    path: Path, tool_name: str, timeout_seconds: float = 2.0
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if path.exists():
+            messages = read_trace(path)
+            if any(
+                message.get("method") == "tools/call"
+                and message.get("params", {}).get("name") == tool_name
+                for message in messages
+            ):
+                return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {tool_name}")
+
+
+def pid_is_running(pid: int) -> bool:
+    result = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}"],
+        check=False,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return re.search(rf"\b{pid}\b", result.stdout) is not None
+
+
+def wait_for_pid_exit(pid: int, timeout_seconds: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not pid_is_running(pid):
+            return True
+        time.sleep(0.05)
+    return not pid_is_running(pid)
 
 
 def test_session_initializes_then_calls_tool(
@@ -74,6 +129,22 @@ def test_request_ids_are_monotonic_across_tool_calls(
 
     messages = read_trace(trace_path)
     assert [message.get("id") for message in messages] == [1, None, 2, 3]
+
+
+def test_concurrent_tool_calls_are_serialized(
+    fake_mcp_command: list[str], tmp_path: Path
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    command = command_for(fake_mcp_command, "concurrent", trace_path)
+
+    with McpStdioSession(command, timeout_seconds=2) as session:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(session.call_tool, "first", {})
+            wait_for_tool_call(trace_path, "first")
+            second = executor.submit(session.call_tool, "second", {})
+
+            assert first.result(timeout=2) == {"tool": "first"}
+            assert second.result(timeout=2) == {"tool": "second"}
 
 
 def test_structured_content_has_priority_over_text_content(
@@ -185,6 +256,37 @@ def test_stderr_is_drained_while_waiting_for_response(
     assert result == {"configured": True}
 
 
+def test_stdout_queue_overflow_is_sanitized_and_terminates_child(
+    fake_mcp_command: list[str], tmp_path: Path
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    marker_path = tmp_path / "flood.marker"
+    command = command_for(
+        fake_mcp_command,
+        "queue-flood",
+        trace_path,
+        "--marker",
+        str(marker_path),
+    )
+    session = McpStdioSession(
+        command, timeout_seconds=2, max_queue_size=2
+    )
+
+    try:
+        session.__enter__()
+        process = session.process
+        assert process is not None
+        wait_for_path(marker_path)
+
+        with pytest.raises(McpTransportError, match="RESPONSE_QUEUE_FULL") as raised:
+            session.call_tool("queue_flood", {})
+
+        assert process.poll() is not None
+        assert "fake-child-secret" not in str(raised.value)
+    finally:
+        session.close()
+
+
 def test_timeout_raises_sanitized_error_and_terminates_child(
     fake_mcp_command: list[str], tmp_path: Path
 ) -> None:
@@ -263,3 +365,115 @@ def test_inbound_server_request_is_rejected_as_invalid_response(
         session.call_tool("server_request", {})
 
     assert "fake-child-secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"timeout_seconds": 0},
+        {"timeout_seconds": -1},
+        {"timeout_seconds": math.inf},
+        {"timeout_seconds": math.nan},
+        {"max_response_bytes": 0},
+        {"max_queue_size": 0},
+    ],
+)
+def test_session_rejects_invalid_limits(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        McpStdioSession([sys.executable], **kwargs)
+
+
+def test_initialize_failure_closes_child(
+    fake_mcp_command: list[str], tmp_path: Path
+) -> None:
+    command = command_for(fake_mcp_command, "init-error", tmp_path / "trace.jsonl")
+    session = McpStdioSession(command, timeout_seconds=2)
+
+    with pytest.raises(McpTransportError, match="TRANSPORT_UNAVAILABLE"):
+        session.__enter__()
+
+    process = session.process
+    assert process is not None
+    assert process.poll() is not None
+    session.close()
+
+
+def test_unexpected_initialize_failure_closes_child(
+    fake_mcp_command: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = command_for(fake_mcp_command, "normal", tmp_path / "trace.jsonl")
+    session = McpStdioSession(command, timeout_seconds=2)
+
+    def fail_initialize() -> None:
+        raise RuntimeError("initialization failed")
+
+    monkeypatch.setattr(session, "_initialize", fail_initialize)
+
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        session.__enter__()
+
+    process = session.process
+    assert process is not None
+    assert process.poll() is not None
+    session.close()
+
+
+def test_reenter_fails_without_replacing_running_process(
+    fake_mcp_command: list[str], tmp_path: Path
+) -> None:
+    command = command_for(fake_mcp_command, "normal", tmp_path / "trace.jsonl")
+    session = McpStdioSession(command, timeout_seconds=2)
+    session.__enter__()
+    process = session.process
+    assert process is not None
+
+    try:
+        with pytest.raises(McpTransportError, match="TRANSPORT_FAILED"):
+            session.__enter__()
+        assert session.process is process
+        assert process.poll() is None
+    finally:
+        session.close()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process trees only")
+def test_close_terminates_windows_process_tree(
+    fake_mcp_command: list[str], tmp_path: Path
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    child_pid_path = tmp_path / "child.pid"
+    command = command_for(
+        fake_mcp_command,
+        "spawn-child",
+        trace_path,
+        "--child-pid-file",
+        str(child_pid_path),
+    )
+    session = McpStdioSession(command, timeout_seconds=2)
+    child_pid: int | None = None
+
+    try:
+        session.__enter__()
+        process = session.process
+        assert process is not None
+        wait_for_path(child_pid_path)
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        assert pid_is_running(child_pid)
+    finally:
+        session.close()
+
+    assert child_pid is not None
+    tree_exited = wait_for_pid_exit(child_pid)
+    if not tree_exited:
+        subprocess.run(
+            ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+            check=False,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    assert tree_exited

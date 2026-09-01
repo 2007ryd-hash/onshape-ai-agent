@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import subprocess
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Any, BinaryIO
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
 DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
+DEFAULT_MAX_QUEUE_SIZE = 128
 
 _EOF = object()
 _OVERSIZED = object()
+_QUEUE_FULL = object()
 
 
 class McpTransportError(RuntimeError):
@@ -34,18 +38,39 @@ class McpStdioSession:
         *,
         timeout_seconds: float = 10.0,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
     ) -> None:
+        timeout_is_valid = False
+        if (
+            not isinstance(timeout_seconds, bool)
+            and isinstance(timeout_seconds, (int, float))
+        ):
+            try:
+                timeout_is_valid = (
+                    math.isfinite(timeout_seconds) and timeout_seconds > 0
+                )
+            except (OverflowError, TypeError):
+                pass
+        if not timeout_is_valid:
+            raise ValueError("timeout_seconds must be a finite positive number")
         if (
             isinstance(max_response_bytes, bool)
             or not isinstance(max_response_bytes, int)
             or max_response_bytes <= 0
         ):
             raise ValueError("max_response_bytes must be a positive integer")
+        if (
+            isinstance(max_queue_size, bool)
+            or not isinstance(max_queue_size, int)
+            or max_queue_size <= 0
+        ):
+            raise ValueError("max_queue_size must be a positive integer")
         self._command = [str(part) for part in command]
         self._timeout_seconds = timeout_seconds
         self._max_response_bytes = max_response_bytes
+        self._request_lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
-        self._stdout_queue: Queue[bytes | object] = Queue()
+        self._stdout_queue: Queue[bytes | object] = Queue(maxsize=max_queue_size)
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._next_id = 1
@@ -59,13 +84,13 @@ class McpStdioSession:
         return self._process
 
     def __enter__(self) -> "McpStdioSession":
-        if self._closed:
+        if self._closed or self._process is not None:
             raise McpTransportError("TRANSPORT_FAILED")
 
-        self._start_process()
         try:
+            self._start_process()
             self._initialize()
-        except McpTransportError:
+        except BaseException:
             self.close()
             raise
         return self
@@ -83,17 +108,18 @@ class McpStdioSession:
         if not isinstance(tool_name, str) or not isinstance(arguments, Mapping):
             raise McpTransportError("INVALID_REQUEST")
 
-        request_id = self._allocate_id()
-        self._send(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "tools/call",
-                "params": {"name": tool_name, "arguments": dict(arguments)},
-            }
-        )
-        result = self._read_rpc_result(request_id)
-        return self._decode_tool_result(result)
+        with self._request_lock:
+            request_id = self._allocate_id()
+            self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": dict(arguments)},
+                }
+            )
+            result = self._read_rpc_result(request_id)
+            return self._decode_tool_result(result)
 
     def close(self) -> None:
         """Close the pipes and terminate the child; repeated calls are harmless."""
@@ -106,13 +132,13 @@ class McpStdioSession:
         if process is None:
             return
 
+        self._terminate_process()
+
         if process.stdin is not None:
             try:
                 process.stdin.close()
             except (OSError, ValueError):
                 pass
-
-        self._terminate_process()
 
         for stream in (process.stdout, process.stderr):
             if stream is not None:
@@ -126,15 +152,21 @@ class McpStdioSession:
                 thread.join(timeout=0.5)
 
     def _start_process(self) -> None:
+        if self._closed or self._process is not None:
+            raise McpTransportError("TRANSPORT_FAILED")
+
+        popen_kwargs: dict[str, object] = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "shell": False,
+            "bufsize": 0,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
         try:
-            process = subprocess.Popen(
-                self._command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-                bufsize=0,
-            )
+            process = subprocess.Popen(self._command, **popen_kwargs)
         except (OSError, ValueError):
             raise McpTransportError("TRANSPORT_UNAVAILABLE") from None
 
@@ -223,6 +255,9 @@ class McpStdioSession:
         if raw_line is _OVERSIZED:
             self._terminate_process()
             raise McpTransportError("RESPONSE_TOO_LARGE")
+        if raw_line is _QUEUE_FULL:
+            self._terminate_process()
+            raise McpTransportError("RESPONSE_QUEUE_FULL")
         if raw_line is _EOF or not isinstance(raw_line, bytes):
             raise McpTransportError("TRANSPORT_FAILED")
 
@@ -273,19 +308,42 @@ class McpStdioSession:
         output: Queue[bytes | object],
         max_response_bytes: int,
     ) -> None:
+        terminal = _EOF
         try:
             while True:
                 line = stream.readline(max_response_bytes + 1)
                 if not line:
                     break
                 if len(line) > max_response_bytes:
-                    output.put(_OVERSIZED)
+                    terminal = _OVERSIZED
                     return
-                output.put(line)
+                try:
+                    output.put_nowait(line)
+                except Full:
+                    terminal = _QUEUE_FULL
+                    return
         except (OSError, ValueError):
             pass
         finally:
-            output.put(_EOF)
+            if terminal is _EOF:
+                try:
+                    output.put_nowait(_EOF)
+                except Full:
+                    pass
+            else:
+                McpStdioSession._replace_queue_with(output, terminal)
+
+    @staticmethod
+    def _replace_queue_with(output: Queue[bytes | object], item: object) -> None:
+        while True:
+            try:
+                output.get_nowait()
+            except Empty:
+                break
+        try:
+            output.put_nowait(item)
+        except Full:
+            pass
 
     @staticmethod
     def _drain_stderr(stream: BinaryIO) -> None:
@@ -297,9 +355,25 @@ class McpStdioSession:
 
     def _terminate_process(self) -> None:
         process = self._process
-        if process is None or process.poll() is not None:
+        if process is None:
             return
 
+        if os.name == "nt" and process.poll() is None:
+            try:
+                subprocess.run(
+                    ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                    check=False,
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.0,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+        if process.poll() is not None:
+            return
         try:
             process.terminate()
             process.wait(timeout=1.0)
