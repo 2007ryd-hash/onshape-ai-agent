@@ -29,8 +29,8 @@ if ([string]::IsNullOrWhiteSpace($StateDir)) {
 }
 
 function Get-NodeCommand() {
-    $command = @(Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if ($null -eq $command) { $command = @(Get-Command 'node' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 }
+    $command = @(Get-Command 'node' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if ($null -eq $command) { $command = @(Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 }
     return $command
 }
 
@@ -74,6 +74,10 @@ function Get-OnshapeTokenPath() {
     $localAppDataRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\Local' }
     return Join-Path $localAppDataRoot 'onshape-mcp\tokens.json'
 }
+
+$npxCommand = Assert-NodeAndNpx
+$mcpPresent = Test-OnshapeMcpPackage $npxCommand
+if (-not $mcpPresent) { throw "Unable to verify pinned $script:OnshapeMcpPackage through npx.cmd" }
 
 function Get-OwnerRepo([string]$markerPath) {
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $null }
@@ -121,10 +125,6 @@ if ($HostTarget -in @('claude', 'all')) {
     $installedPaths += Install-ClaudeAgents $ClaudeConfigDir
 }
 
-$npxCommand = Assert-NodeAndNpx
-$mcpPresent = Test-OnshapeMcpPackage $npxCommand
-if (-not $mcpPresent) { throw "Unable to verify pinned $script:OnshapeMcpPackage through npx.cmd" }
-
 $pythonPath = Join-Path $repoRoot '.venv\Scripts\python.exe'
 if (-not $SkipRuntimeInstall) {
     if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
@@ -134,8 +134,8 @@ if (-not $SkipRuntimeInstall) {
     & $pythonPath -m pip install -e $repoRoot | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Failed to install onshape-engineering-agent runtime' }
 } elseif (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
-    $pythonCommand = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -eq $pythonCommand) { $pythonCommand = Get-Command python -CommandType Application -ErrorAction Stop }
+    $pythonCommand = @(Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if ($null -eq $pythonCommand) { $pythonCommand = @(Get-Command python -CommandType Application -ErrorAction Stop) | Select-Object -First 1 }
     $pythonPath = $pythonCommand.Source
 }
 

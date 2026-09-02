@@ -6,8 +6,8 @@ $script:OnshapeMcpVersion = '0.5.2'
 $script:OnshapeMcpPackage = 'onshape-mcp@0.5.2'
 
 function Get-NodeCommand() {
-    $command = @(Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if ($null -eq $command) { $command = @(Get-Command 'node' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 }
+    $command = @(Get-Command 'node' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if ($null -eq $command) { $command = @(Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 }
     return $command
 }
 

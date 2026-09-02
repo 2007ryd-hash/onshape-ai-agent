@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ def _run_script(
     env: dict[str, str] | None = None,
     input_text: str | None = None,
     cwd: Path | None = None,
+    repo_root: Path = REPO_ROOT,
 ) -> subprocess.CompletedProcess[str]:
     if POWERSHELL is None:
         pytest.skip("PowerShell is required for Windows installer tests")
@@ -32,7 +34,7 @@ def _run_script(
         "-InputFormat",
         "Text",
         "-File",
-        str(REPO_ROOT / "scripts" / script),
+        str(repo_root / "scripts" / script),
         *arguments,
     ]
     return subprocess.run(
@@ -48,28 +50,68 @@ def _run_script(
     )
 
 
-def _fake_npx(tmp_path: Path) -> tuple[Path, Path]:
-    """Create a harmless npx.cmd shim and return its bin and trace paths."""
+def _fake_tools(
+    tmp_path: Path,
+    *,
+    node_version: str = "v24.0.0",
+    npx_version: str = "0.5.2",
+    include_node: bool = True,
+    npx_exit_code: int = 0,
+) -> tuple[Path, Path]:
+    """Create harmless node/npx shims and return their bin and trace paths."""
 
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     trace_path = tmp_path / "npx-args.txt"
+    if include_node:
+        (bin_dir / "node.cmd").write_text(
+            "@echo off\r\n"
+            f"if \"%~1\"==\"--version\" echo {node_version}\r\n"
+            "exit /b 0\r\n",
+            encoding="ascii",
+        )
     (bin_dir / "npx.cmd").write_text(
         "@echo off\r\n"
         ">\"%FAKE_NPX_TRACE%\" echo %*\r\n"
-        "if \"%~3\"==\"--version\" echo 0.5.2\r\n"
-        "exit /b 0\r\n",
+        f"if \"%~3\"==\"--version\" echo {npx_version}\r\n"
+        f"exit /b {npx_exit_code}\r\n",
         encoding="ascii",
     )
     return bin_dir, trace_path
 
 
 def _with_fake_npx(tmp_path: Path) -> tuple[dict[str, str], Path]:
-    bin_dir, trace_path = _fake_npx(tmp_path)
+    bin_dir, trace_path = _fake_tools(tmp_path)
     environment = dict(os.environ)
     environment["PATH"] = f"{bin_dir}{os.pathsep}{environment['PATH']}"
     environment["FAKE_NPX_TRACE"] = str(trace_path)
     return environment, trace_path
+
+
+def _with_fake_tools(
+    tmp_path: Path,
+    *,
+    node_version: str = "v24.0.0",
+    npx_version: str = "0.5.2",
+    include_node: bool = True,
+    npx_exit_code: int = 0,
+    only_fake_path: bool = False,
+) -> tuple[dict[str, str], Path, Path]:
+    bin_dir, trace_path = _fake_tools(
+        tmp_path,
+        node_version=node_version,
+        npx_version=npx_version,
+        include_node=include_node,
+        npx_exit_code=npx_exit_code,
+    )
+    environment = dict(os.environ)
+    environment["PATH"] = (
+        str(bin_dir)
+        if only_fake_path
+        else f"{bin_dir}{os.pathsep}{environment['PATH']}"
+    )
+    environment["FAKE_NPX_TRACE"] = str(trace_path)
+    return environment, trace_path, bin_dir
 
 
 def test_install_all_hosts_and_runner_work_offline(tmp_path: Path) -> None:
@@ -152,6 +194,7 @@ def test_install_refuses_unowned_destination_without_force(tmp_path: Path) -> No
     destination.mkdir(parents=True)
     (destination / "user-file.txt").write_text("keep", encoding="utf-8")
 
+    environment, _ = _with_fake_npx(tmp_path)
     result = _run_script(
         "install.ps1",
         "-HostTarget",
@@ -161,6 +204,7 @@ def test_install_refuses_unowned_destination_without_force(tmp_path: Path) -> No
         str(codex_home),
         "-StateDir",
         str(tmp_path / "state"),
+        env=environment,
     )
 
     assert result.returncode != 0
@@ -361,3 +405,195 @@ def test_uninstall_preserves_upstream_config_and_tokens(tmp_path: Path) -> None:
     assert config_path.is_file()
     assert token_path.is_file()
     assert "preserve" in uninstall.stdout.lower()
+
+
+def test_install_validates_pinned_mcp_before_creating_host_links(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(
+        tmp_path,
+        npx_version="0.5.1",
+    )
+
+    result = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        "codex",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "pinned onshape-mcp@0.5.2" in result.stderr
+    assert not (codex_home / "skills" / "onshape-engineering").exists()
+    assert not (state_dir / "install.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("node_version", "include_node"),
+    [("v21.0.0", True), ("v24.0.0", False)],
+)
+def test_setup_scripts_use_fake_node_and_reject_old_or_missing_node(
+    tmp_path: Path,
+    node_version: str,
+    include_node: bool,
+) -> None:
+    environment, _, _ = _with_fake_tools(
+        tmp_path,
+        node_version=node_version,
+        include_node=include_node,
+        only_fake_path=True,
+    )
+
+    for script in ("configure-onshape.ps1", "login-onshape.ps1"):
+        result = _run_script(script, env=environment)
+        assert result.returncode != 0
+        assert "Node.js 22" in result.stderr
+
+
+def test_configure_preserves_toml_sections_and_escapes_credentials(
+    tmp_path: Path,
+) -> None:
+    environment, _, _ = _with_fake_tools(tmp_path)
+    appdata = tmp_path / "appdata"
+    environment["APPDATA"] = str(appdata)
+    config_dir = appdata / "onshape-mcp"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.toml"
+    config_path.write_bytes(
+        (
+            '[general]\r\nkeep = "yes"\r\n\r\n'
+            '[auth]\r\nprovider = "onshape"\r\n'
+            'client_id = "old-id"\r\nclient_secret = "old-secret"\r\n'
+            'redirect_uri = "old-callback"\r\n\r\n'
+            '[other]\r\nanswer = 42\r\n'
+        ).encode("utf-8")
+    )
+
+    result = _run_script(
+        "configure-onshape.ps1",
+        env=environment,
+        input_text='id"quoted\\path\nsec"ret\\path\n',
+    )
+
+    assert result.returncode == 0, result.stderr
+    config = config_path.read_text(encoding="utf-8")
+    assert "[general]" in config
+    assert 'keep = "yes"' in config
+    assert "[auth]" in config
+    assert 'provider = "onshape"' in config
+    assert "[other]" in config
+    assert "answer = 42" in config
+    assert 'client_id = "id\\"quoted\\\\path"' in config
+    assert 'client_secret = "sec\\"ret\\\\path"' in config
+    assert config.count("client_id =") == 1
+    assert config.count("client_secret =") == 1
+    assert config.count("redirect_uri =") == 1
+
+
+def test_configure_atomic_failure_keeps_existing_config_and_cleans_temp(
+    tmp_path: Path,
+) -> None:
+    environment, _, _ = _with_fake_tools(tmp_path)
+    appdata = tmp_path / "appdata"
+    environment["APPDATA"] = str(appdata)
+    config_dir = appdata / "onshape-mcp"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.toml"
+    original = '[auth]\nclient_id = "original"\n'
+    config_path.write_text(original, encoding="utf-8")
+    config_path.chmod(stat.S_IREAD)
+
+    result = _run_script(
+        "configure-onshape.ps1",
+        env=environment,
+        input_text="new-id\nnew-secret\n",
+    )
+
+    config_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+    assert result.returncode != 0
+    assert config_path.read_text(encoding="utf-8") == original
+    assert not list(config_dir.glob(".config.toml.*.tmp"))
+
+
+def test_skip_runtime_install_without_venv_falls_back_to_importable_python(
+    tmp_path: Path,
+) -> None:
+    mini_repo = tmp_path / "repo-without-venv"
+    shutil.copytree(
+        REPO_ROOT,
+        mini_repo,
+        ignore=shutil.ignore_patterns(
+            ".venv",
+            ".git",
+            ".pytest_cache",
+            ".ruff_cache",
+            "__pycache__",
+        ),
+    )
+    assert not (mini_repo / ".venv").exists()
+    codex_home = tmp_path / "codex"
+    state_dir = tmp_path / "state"
+    environment, _, fake_bin = _with_fake_tools(tmp_path)
+    environment["PATH"] = (
+        f"{Path(sys.executable).parent}{os.pathsep}{fake_bin}"
+        f"{os.pathsep}{os.environ['PATH']}"
+    )
+
+    install = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        "codex",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+        cwd=tmp_path,
+        repo_root=mini_repo,
+    )
+
+    assert install.returncode == 0, install.stderr
+    state = json.loads((state_dir / "install.json").read_text(encoding="utf-8-sig"))
+    assert Path(state["repo_root"]).resolve() == mini_repo.resolve()
+    assert Path(state["python_path"]).is_file()
+    launcher = (
+        codex_home
+        / "skills"
+        / "onshape-engineering"
+        / "scripts"
+        / "onshape-agent.ps1"
+    )
+    launcher_environment = dict(environment)
+    launcher_environment["ONSHAPE_AGENT_STATE_DIR"] = str(state_dir)
+    result = subprocess.run(
+        [
+            POWERSHELL,
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-InputFormat",
+            "Text",
+            "-File",
+            str(launcher),
+            "doctor",
+            "--json",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        env=launcher_environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "READY_OFFLINE"

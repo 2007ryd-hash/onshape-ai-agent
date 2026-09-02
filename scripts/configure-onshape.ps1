@@ -7,8 +7,8 @@ $script:OnshapeMcpPackage = 'onshape-mcp@0.5.2'
 $script:OnshapeCallback = 'http://localhost:18338/callback'
 
 function Get-NodeCommand() {
-    $command = @(Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if ($null -eq $command) { $command = @(Get-Command 'node' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 }
+    $command = @(Get-Command 'node' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if ($null -eq $command) { $command = @(Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 }
     return $command
 }
 
@@ -131,7 +131,26 @@ $configPath = Join-Path $configDirectory 'config.toml'
 New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
 $existingConfig = if (Test-Path -LiteralPath $configPath -PathType Leaf) { Get-Content -Raw -LiteralPath $configPath } else { '' }
 $configText = Update-AuthSection $existingConfig $clientId $clientSecret $script:OnshapeCallback
-[IO.File]::WriteAllText($configPath, $configText, (New-Object Text.UTF8Encoding($false)))
+$fileId = [Guid]::NewGuid().ToString('N')
+$temporaryPath = Join-Path $configDirectory ('.config.toml.' + $fileId + '.tmp')
+$backupPath = Join-Path $configDirectory ('.config.toml.' + $fileId + '.bak')
+try {
+    [IO.File]::WriteAllText($temporaryPath, $configText, (New-Object Text.UTF8Encoding($false)))
+    if ([IO.File]::Exists($configPath)) {
+        [IO.File]::Replace($temporaryPath, $configPath, $backupPath, $true)
+    } else {
+        [IO.File]::Move($temporaryPath, $configPath)
+    }
+} catch {
+    throw "Unable to update upstream Onshape configuration: $configPath"
+} finally {
+    if ([IO.File]::Exists($temporaryPath)) {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+    if ([IO.File]::Exists($backupPath)) {
+        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+    }
+}
 $clientSecret = $null
 Write-Output "OAuth configuration saved to $configPath"
 Write-Output 'Next step: run scripts/login-onshape.ps1 to explicitly authorize access.'
