@@ -127,19 +127,37 @@ function Remove-TransactionPath([string]$path) {
 }
 
 function Invoke-TransactionRollback() {
+    $rollbackErrors = @()
     for ($index = $script:TransactionCreated.Count - 1; $index -ge 0; $index--) {
-        Remove-TransactionPath $script:TransactionCreated[$index]
+        try {
+            Remove-TransactionPath $script:TransactionCreated[$index]
+        } catch {
+            $rollbackErrors += $_.Exception.Message
+        }
     }
     for ($index = $script:TransactionEntries.Count - 1; $index -ge 0; $index--) {
         $entry = $script:TransactionEntries[$index]
-        if (Test-Path -LiteralPath $entry.BackupPath) {
-            if (Test-Path -LiteralPath $entry.Path) { Remove-InstalledPath $entry.Path }
-            Move-Item -LiteralPath $entry.BackupPath -Destination $entry.Path -Force | Out-Null
+        try {
+            if (Test-Path -LiteralPath $entry.BackupPath) {
+                if (Test-Path -LiteralPath $entry.Path) { Remove-InstalledPath $entry.Path }
+                Move-Item -LiteralPath $entry.BackupPath -Destination $entry.Path -Force | Out-Null
+            }
+        } catch {
+            $rollbackErrors += $_.Exception.Message
         }
+    }
+    if ($env:ONSHAPE_AGENT_TEST_FAIL_ROLLBACK -eq '1') {
+        $rollbackErrors += 'Injected rollback failure'
+    }
+    if ($rollbackErrors.Count -gt 0) {
+        throw ("Rollback failed: " + ($rollbackErrors -join '; '))
     }
 }
 
 function Invoke-TransactionCommit() {
+    if ($env:ONSHAPE_AGENT_TEST_FAIL_COMMIT_CLEANUP -eq '1') {
+        throw 'Injected transaction commit cleanup failure'
+    }
     foreach ($entry in @($script:TransactionEntries)) {
         if (Test-Path -LiteralPath $entry.BackupPath) { Remove-InstalledPath $entry.BackupPath }
     }
@@ -161,7 +179,7 @@ function Test-PythonImport([string]$pythonPath, [string]$sourceRoot) {
         } else {
             $env:PYTHONPATH = "$sourceRoot$([IO.Path]::PathSeparator)$previousPythonPath"
         }
-        & $pythonPath -c 'import onshape_agent' 1>$null 2>$null
+        & $pythonPath -c 'import onshape_agent, typer, pydantic, tomlkit' 1>$null 2>$null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -232,7 +250,7 @@ if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) { throw "Python ru
 
 $sourceRoot = Join-Path $repoRoot 'src'
 if (-not (Test-PythonImport $pythonPath $sourceRoot)) {
-    throw 'Selected Python runtime cannot import onshape_agent with the repository source path'
+    throw 'Selected Python runtime cannot import onshape_agent and runtime dependencies with the repository source path'
 }
 
 $codexDestination = Join-Path $CodexHome 'skills\onshape-engineering'
@@ -249,6 +267,9 @@ if ($HostTarget -in @('codex', 'all')) {
     Assert-DirectoryTarget $codexDestination
     $codexMarker = "$codexDestination.onshape-agent-owner.json"
     $codexOwner = Get-OwnerRepo $codexMarker
+    if ((Test-Path -LiteralPath $codexMarker -PathType Leaf) -and ($codexOwner -ne $repoRoot) -and (-not $Force)) {
+        throw "Marker is not owned by this project: $codexMarker"
+    }
     if ((Test-Path -LiteralPath $codexDestination) -and ($codexOwner -ne $repoRoot) -and (-not $Force)) {
         throw "Destination is not owned by this project: $codexDestination"
     }
@@ -261,10 +282,16 @@ if ($HostTarget -in @('claude', 'all')) {
     Assert-DirectoryTarget $claudeAgentRoot
     $claudeMarker = "$claudeDestination.onshape-agent-owner.json"
     $claudeOwner = Get-OwnerRepo $claudeMarker
+    if ((Test-Path -LiteralPath $claudeMarker -PathType Leaf) -and ($claudeOwner -ne $repoRoot) -and (-not $Force)) {
+        throw "Marker is not owned by this project: $claudeMarker"
+    }
     if ((Test-Path -LiteralPath $claudeDestination) -and ($claudeOwner -ne $repoRoot) -and (-not $Force)) {
         throw "Destination is not owned by this project: $claudeDestination"
     }
     $agentOwner = Get-OwnerRepo $claudeAgentMarker
+    if ((Test-Path -LiteralPath $claudeAgentMarker -PathType Leaf) -and ($agentOwner -ne $repoRoot) -and (-not $Force)) {
+        throw "Marker is not owned by this project: $claudeAgentMarker"
+    }
     $occupiedTargets = @($claudeTargets | Where-Object { Test-Path -LiteralPath $_ })
     if (($occupiedTargets.Count -gt 0) -and ($agentOwner -ne $repoRoot) -and (-not $Force)) {
         throw "Claude agent destination is not owned by this project: $claudeAgentRoot"
@@ -290,8 +317,10 @@ try {
         if ($env:ONSHAPE_AGENT_TEST_FAIL_HOST -eq 'claude') { throw 'Injected host installation failure: claude' }
     }
 
-    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     $statePath = Join-Path $StateDir 'install.json'
+    Add-TransactionBackup $statePath
+    Add-TransactionCreated $statePath
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     $state = @{
         schema_version = '1.1'
         repo_root = $repoRoot
@@ -306,6 +335,9 @@ try {
         tokens_present = [bool](Test-Path -LiteralPath (Get-OnshapeTokenPath) -PathType Leaf)
     }
     Write-JsonAtomic $statePath $state
+    if ($env:ONSHAPE_AGENT_TEST_FAIL_AFTER_STATE_WRITE -eq '1') {
+        throw 'Injected failure after state write'
+    }
     Invoke-TransactionCommit
     $transactionCommitted = $true
     $nextSteps = @(
@@ -327,7 +359,12 @@ try {
 } catch {
     $failure = $_
     if (-not $transactionCommitted) {
-        try { Invoke-TransactionRollback } catch { }
+        try {
+            Invoke-TransactionRollback
+        } catch {
+            $rollbackFailure = $_
+            throw "Onshape installation failed: $($failure.Exception.Message); rollback failed: $($rollbackFailure.Exception.Message)"
+        }
     }
     throw $failure
 }

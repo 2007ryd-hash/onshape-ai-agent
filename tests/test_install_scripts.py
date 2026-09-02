@@ -486,6 +486,189 @@ def test_install_rolls_back_first_host_when_second_host_fails(tmp_path: Path) ->
     assert not list(tmp_path.glob("**/*.onshape-agent-owner.json"))
 
 
+@pytest.mark.parametrize(
+    "failure_variable",
+    [
+        "ONSHAPE_AGENT_TEST_FAIL_AFTER_STATE_WRITE",
+        "ONSHAPE_AGENT_TEST_FAIL_COMMIT_CLEANUP",
+    ],
+)
+def test_install_restores_state_and_hosts_after_late_transaction_failure(
+    tmp_path: Path,
+    failure_variable: str,
+) -> None:
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    arguments = [
+        "-HostTarget",
+        "all",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+    ]
+
+    first = _run_script("install.ps1", *arguments, env=environment)
+    assert first.returncode == 0, first.stderr
+    state_path = state_dir / "install.json"
+    codex_marker = (
+        codex_home / "skills" / "onshape-engineering.onshape-agent-owner.json"
+    )
+    claude_marker = (
+        claude_home / "skills" / "onshape-engineering.onshape-agent-owner.json"
+    )
+    agent_marker = claude_home / "agents" / ".onshape-engineering-agent-owner.json"
+    preserved_files = [state_path, codex_marker, claude_marker, agent_marker]
+    preserved_files.extend(
+        sorted((claude_home / "agents").glob("onshape-engineering-*.md"))
+    )
+    before = {path: path.read_bytes() for path in preserved_files}
+
+    environment[failure_variable] = "1"
+    second = _run_script("install.ps1", *arguments, env=environment)
+
+    assert second.returncode != 0
+    assert "injected" in second.stderr.lower()
+    for path, content in before.items():
+        assert path.read_bytes() == content
+    assert (codex_home / "skills" / "onshape-engineering").is_dir()
+    assert (claude_home / "skills" / "onshape-engineering").is_dir()
+    assert not list(tmp_path.glob("**/*.onshape-agent-backup-*"))
+    assert not list(tmp_path.glob("**/*.tmp"))
+    assert not list(tmp_path.glob("**/*.bak"))
+
+
+def test_install_reports_original_and_rollback_errors(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    environment["ONSHAPE_AGENT_TEST_FAIL_AFTER_STATE_WRITE"] = "1"
+    environment["ONSHAPE_AGENT_TEST_FAIL_ROLLBACK"] = "1"
+
+    result = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        "codex",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    message = result.stderr.lower()
+    assert "installation failed" in message
+    assert "rollback failed" in message
+    assert "after state write" in message
+    assert "rollback" in message
+
+
+@pytest.mark.parametrize(
+    "marker_kind", ["codex-skill", "claude-skill", "claude-agents"]
+)
+def test_install_rejects_unowned_marker_without_destination(
+    tmp_path: Path,
+    marker_kind: str,
+) -> None:
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    if marker_kind == "codex-skill":
+        destination = codex_home / "skills" / "onshape-engineering"
+        host_target = "codex"
+        marker = Path(f"{destination}.onshape-agent-owner.json")
+    elif marker_kind == "claude-skill":
+        destination = claude_home / "skills" / "onshape-engineering"
+        host_target = "claude"
+        marker = Path(f"{destination}.onshape-agent-owner.json")
+    else:
+        destination = claude_home / "agents"
+        host_target = "claude"
+        marker = destination / ".onshape-engineering-agent-owner.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps({"repo_root": str(tmp_path / "other-repo")}), encoding="utf-8"
+    )
+
+    environment, _, _ = _with_fake_tools(tmp_path)
+    result = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        host_target,
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "marker" in result.stderr.lower()
+    assert marker.read_text(encoding="utf-8") == json.dumps(
+        {"repo_root": str(tmp_path / "other-repo")}
+    )
+    if marker_kind != "claude-agents":
+        assert not destination.exists()
+    else:
+        assert not list(destination.glob("onshape-engineering-*.md"))
+
+
+def test_skip_runtime_install_rejects_python_missing_runtime_dependencies(
+    tmp_path: Path,
+) -> None:
+    mini_repo = tmp_path / "repo-without-runtime-dependencies"
+    shutil.copytree(
+        REPO_ROOT,
+        mini_repo,
+        ignore=shutil.ignore_patterns(
+            ".venv",
+            ".git",
+            ".pytest_cache",
+            ".ruff_cache",
+            "__pycache__",
+        ),
+    )
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(mini_repo / ".venv")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (mini_repo / ".venv" / "Scripts" / "python.exe").is_file()
+    codex_home = tmp_path / "codex"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+
+    result = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        "codex",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+        cwd=tmp_path,
+        repo_root=mini_repo,
+    )
+
+    assert result.returncode != 0
+    assert "import onshape_agent and runtime dependencies" in result.stderr.lower()
+    assert not (codex_home / "skills" / "onshape-engineering").exists()
+    assert not (state_dir / "install.json").exists()
+
+
 def test_install_script_uses_one_atomic_json_writer_for_state_and_markers() -> None:
     install = (REPO_ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     assert install.count("function Write-JsonAtomic") == 1
