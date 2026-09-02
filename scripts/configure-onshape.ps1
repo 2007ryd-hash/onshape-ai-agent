@@ -31,61 +31,23 @@ function Assert-NodeAndNpx() {
     return $npx
 }
 
-function ConvertTo-TomlString([string]$value) {
-    $escaped = $value.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n')
-    return '"' + $escaped + '"'
-}
-
-function Update-AuthSection([string]$content, [string]$clientId, [string]$clientSecret, [string]$callback) {
-    $lines = if ($null -eq $content -or $content.Length -eq 0) { @() } else { @($content -split "`r?`n") }
-    $authStart = -1
-    $authEnd = $lines.Count
-    for ($index = 0; $index -lt $lines.Count; $index++) {
-        if ($lines[$index] -match '^\s*\[auth\]\s*$') { $authStart = $index; break }
+function Resolve-InstallState() {
+    $stateDir = if ($env:ONSHAPE_AGENT_STATE_DIR) {
+        $env:ONSHAPE_AGENT_STATE_DIR
+    } elseif ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA 'onshape-engineering-agent'
+    } else {
+        Join-Path $HOME 'AppData\Local\onshape-engineering-agent'
     }
-    if ($authStart -ge 0) {
-        for ($index = $authStart + 1; $index -lt $lines.Count; $index++) {
-            if ($lines[$index] -match '^\s*\[[^\]]+\]\s*$') { $authEnd = $index; break }
-        }
-        $values = @{
-            'client_id' = ConvertTo-TomlString $clientId
-            'client_secret' = ConvertTo-TomlString $clientSecret
-            'redirect_uri' = ConvertTo-TomlString $callback
-        }
-        $seen = @{}
-        $updated = New-Object System.Collections.Generic.List[string]
-        for ($index = 0; $index -lt $lines.Count; $index++) {
-            $line = [string]$lines[$index]
-            if (($index -gt $authStart) -and ($index -lt $authEnd) -and ($line -match '^\s*(client_id|client_secret|redirect_uri)\s*=')) {
-                $key = $Matches[1]
-                if (-not $seen.ContainsKey($key)) {
-                    $updated.Add("$key = $($values[$key])")
-                    $seen[$key] = $true
-                }
-                continue
-            }
-            $updated.Add($line)
-            if ($index -eq $authStart) {
-                # Existing auth keys are inserted immediately below the section header.
-                foreach ($key in @('client_id', 'client_secret', 'redirect_uri')) {
-                    if (-not $seen.ContainsKey($key)) {
-                        $updated.Add("$key = $($values[$key])")
-                        $seen[$key] = $true
-                    }
-                }
-            }
-        }
-        return ($updated -join "`n").TrimEnd("`n") + "`n"
+    $statePath = Join-Path $stateDir 'install.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        throw "Onshape Engineering Agent is not installed: $statePath"
     }
-
-    $suffix = @(
-        '',
-        '[auth]',
-        "client_id = $(ConvertTo-TomlString $clientId)",
-        "client_secret = $(ConvertTo-TomlString $clientSecret)",
-        "redirect_uri = $(ConvertTo-TomlString $callback)"
-    )
-    return (($lines + $suffix) -join "`n").TrimStart("`n") + "`n"
+    try {
+        return Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+    } catch {
+        throw "Onshape Engineering Agent install state is invalid: $statePath"
+    }
 }
 
 function Read-ClientId() {
@@ -98,8 +60,7 @@ function Read-ClientSecret() {
         return Read-Host 'Onshape OAuth client secret' -AsSecureString
     }
     # Read-Host owns the interactive path. A redirected stdin path is kept for
-    # deterministic automation and turns the line into a SecureString before
-    # the common BSTR conversion below.
+    # deterministic automation and turns the line into a SecureString below.
     $plainSecret = [Console]::In.ReadLine()
     if ($null -eq $plainSecret) { return $null }
     $secure = New-Object Security.SecureString
@@ -108,49 +69,71 @@ function Read-ClientSecret() {
     return $secure
 }
 
-$null = Assert-NodeAndNpx
-Write-Output 'Onshape OAuth setup'
-Write-Output "Register a user-owned OAuth application with callback: $script:OnshapeCallback"
-$clientId = Read-ClientId
-if ([string]::IsNullOrWhiteSpace($clientId)) { throw 'Client ID cannot be empty' }
-$secureSecret = Read-ClientSecret
-if ($null -eq $secureSecret) { throw 'Client secret cannot be empty' }
+$secureSecret = $null
 $secretPointer = [IntPtr]::Zero
 $clientSecret = $null
+$clientId = $null
+$payloadJson = $null
+$configText = $null
+$existingConfig = $null
+$state = $null
 try {
-    $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
-    $clientSecret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
-} finally {
-    if ($secretPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer) }
-}
-if ([string]::IsNullOrEmpty($clientSecret)) { throw 'Client secret cannot be empty' }
+    $null = Assert-NodeAndNpx
+    $state = Resolve-InstallState
+    $pythonPath = [string]$state.python_path
+    $repoRoot = [string]$state.repo_root
+    if ([string]::IsNullOrWhiteSpace($pythonPath) -or [string]::IsNullOrWhiteSpace($repoRoot)) {
+        throw 'Onshape Engineering Agent install state is incomplete'
+    }
+    if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+        throw 'Installed Python runtime is missing'
+    }
+    if (-not (Test-Path -LiteralPath $repoRoot -PathType Container)) {
+        throw 'Installed repository is missing'
+    }
+    $repoRoot = (Resolve-Path -LiteralPath $repoRoot).Path
+    $sourceRoot = Join-Path $repoRoot 'src'
+    $pathSeparator = [IO.Path]::PathSeparator
+    if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
+        $env:PYTHONPATH = $sourceRoot
+    } elseif (($env:PYTHONPATH -split [regex]::Escape([string]$pathSeparator)) -notcontains $sourceRoot) {
+        $env:PYTHONPATH = "$sourceRoot$pathSeparator$($env:PYTHONPATH)"
+    }
 
-$appDataRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME 'AppData\Roaming' }
-$configDirectory = Join-Path $appDataRoot 'onshape-mcp'
-$configPath = Join-Path $configDirectory 'config.toml'
-New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
-$existingConfig = if (Test-Path -LiteralPath $configPath -PathType Leaf) { Get-Content -Raw -LiteralPath $configPath } else { '' }
-$configText = Update-AuthSection $existingConfig $clientId $clientSecret $script:OnshapeCallback
-$fileId = [Guid]::NewGuid().ToString('N')
-$temporaryPath = Join-Path $configDirectory ('.config.toml.' + $fileId + '.tmp')
-$backupPath = Join-Path $configDirectory ('.config.toml.' + $fileId + '.bak')
-try {
-    [IO.File]::WriteAllText($temporaryPath, $configText, (New-Object Text.UTF8Encoding($false)))
-    if ([IO.File]::Exists($configPath)) {
-        [IO.File]::Replace($temporaryPath, $configPath, $backupPath, $true)
-    } else {
-        [IO.File]::Move($temporaryPath, $configPath)
+    Write-Output 'Onshape OAuth setup'
+    Write-Output "Register a user-owned OAuth application with callback: $script:OnshapeCallback"
+    $clientId = Read-ClientId
+    if ([string]::IsNullOrWhiteSpace($clientId)) { throw 'Client ID cannot be empty' }
+    $secureSecret = Read-ClientSecret
+    if ($null -eq $secureSecret) { throw 'Client secret cannot be empty' }
+    try {
+        $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+        $clientSecret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
+    } finally {
+        if ($secretPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer) }
+        $secretPointer = [IntPtr]::Zero
     }
-} catch {
-    throw "Unable to update upstream Onshape configuration: $configPath"
+    if ([string]::IsNullOrEmpty($clientSecret)) { throw 'Client secret cannot be empty' }
+
+    $appDataRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME 'AppData\Roaming' }
+    $configPath = Join-Path $appDataRoot 'onshape-mcp\config.toml'
+    $payloadJson = @{
+        client_id = $clientId
+        client_secret = $clientSecret
+        redirect_uri = $script:OnshapeCallback
+    } | ConvertTo-Json -Compress
+    $payloadJson | & $pythonPath -m onshape_agent.onshape_config --config-path $configPath 1>$null 2>$null
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "Unable to update upstream Onshape configuration: $configPath" }
+    Write-Output "OAuth configuration saved to $configPath"
+    Write-Output 'Next step: run scripts/login-onshape.ps1 to explicitly authorize access.'
 } finally {
-    if ([IO.File]::Exists($temporaryPath)) {
-        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
-    }
-    if ([IO.File]::Exists($backupPath)) {
-        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
-    }
+    if ($null -ne $secureSecret) { $secureSecret.Dispose() }
+    if ($secretPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer) }
+    $clientSecret = $null
+    $clientId = $null
+    $payloadJson = $null
+    $configText = $null
+    $existingConfig = $null
+    $state = $null
 }
-$clientSecret = $null
-Write-Output "OAuth configuration saved to $configPath"
-Write-Output 'Next step: run scripts/login-onshape.ps1 to explicitly authorize access.'

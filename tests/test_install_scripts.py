@@ -114,6 +114,24 @@ def _with_fake_tools(
     return environment, trace_path, bin_dir
 
 
+def _install_for_setup(tmp_path: Path, environment: dict[str, str]) -> Path:
+    state_dir = tmp_path / "setup-state"
+    result = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        "codex",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(tmp_path / "setup-codex"),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    environment["ONSHAPE_AGENT_STATE_DIR"] = str(state_dir)
+    return state_dir
+
+
 def test_install_all_hosts_and_runner_work_offline(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     claude_home = tmp_path / "claude"
@@ -262,8 +280,10 @@ def test_setup_scripts_pin_safe_onshape_command_and_callback() -> None:
     assert "clientsecret" not in configure.lower().split("param", 1)[-1].split(
         ")", 1
     )[0]
-    assert "install.json" not in configure
+    assert "Write-JsonAtomic" not in configure
     assert "PYTHONPATH" in launcher
+    assert "onshape_agent.onshape_config" in configure
+    assert "--config-path" in configure
 
 
 def test_configure_writes_only_upstream_config_without_echoing_secret(
@@ -274,6 +294,8 @@ def test_configure_writes_only_upstream_config_without_echoing_secret(
     localappdata = tmp_path / "localappdata"
     environment["APPDATA"] = str(appdata)
     environment["LOCALAPPDATA"] = str(localappdata)
+    state_dir = _install_for_setup(tmp_path, environment)
+    state_before = (state_dir / "install.json").read_bytes()
     secret = "secret-value-that-must-not-leak"
 
     result = _run_script(
@@ -291,7 +313,7 @@ def test_configure_writes_only_upstream_config_without_echoing_secret(
     assert 'redirect_uri = "http://localhost:18338/callback"' in config
     assert secret not in result.stdout
     assert secret not in result.stderr
-    assert not list(tmp_path.glob("**/install.json"))
+    assert (state_dir / "install.json").read_bytes() == state_before
 
 
 def test_login_invokes_only_explicit_pinned_auth_login(tmp_path: Path) -> None:
@@ -435,6 +457,42 @@ def test_install_validates_pinned_mcp_before_creating_host_links(
     assert not (state_dir / "install.json").exists()
 
 
+def test_install_rolls_back_first_host_when_second_host_fails(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    environment["ONSHAPE_AGENT_TEST_FAIL_HOST"] = "claude"
+
+    result = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        "all",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "injected" in result.stderr.lower()
+    assert not (codex_home / "skills" / "onshape-engineering").exists()
+    assert not (claude_home / "skills" / "onshape-engineering").exists()
+    assert not (state_dir / "install.json").exists()
+    assert not list(tmp_path.glob("**/*.onshape-agent-owner.json"))
+
+
+def test_install_script_uses_one_atomic_json_writer_for_state_and_markers() -> None:
+    install = (REPO_ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert install.count("function Write-JsonAtomic") == 1
+    assert "Write-JsonAtomic $marker" in install
+    assert "Write-JsonAtomic $statePath" in install
+
+
 @pytest.mark.parametrize(
     ("node_version", "include_node"),
     [("v21.0.0", True), ("v24.0.0", False)],
@@ -463,6 +521,7 @@ def test_configure_preserves_toml_sections_and_escapes_credentials(
     environment, _, _ = _with_fake_tools(tmp_path)
     appdata = tmp_path / "appdata"
     environment["APPDATA"] = str(appdata)
+    _install_for_setup(tmp_path, environment)
     config_dir = appdata / "onshape-mcp"
     config_dir.mkdir(parents=True)
     config_path = config_dir / "config.toml"
@@ -520,6 +579,7 @@ def test_configure_atomic_failure_keeps_existing_config_and_cleans_temp(
     assert result.returncode != 0
     assert config_path.read_text(encoding="utf-8") == original
     assert not list(config_dir.glob(".config.toml.*.tmp"))
+    assert not list(config_dir.glob(".config.toml.*.bak"))
 
 
 def test_skip_runtime_install_without_venv_falls_back_to_importable_python(
