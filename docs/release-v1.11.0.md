@@ -16,4 +16,10 @@ This release does not create or modify live CAD, assemblies, mates, or drawings.
 Users supply their own OAuth app credentials and consent; configuration and
 tokens remain local and are not shipped in this repository.
 
-See [authentication](authentication.md) and the repository README for setup.
+Acceptance: 286 tests, Ruff, skill/plugin validators, and a clean-archive
+installation with a fresh Python environment passed. The installed launcher
+passed live doctor from outside the repository; the offline example retained
+its explicit simulated repair result.
+
+See [authentication](https://github.com/2007ryd-hash/onshape-ai-agent/blob/v1.11.0/docs/authentication.md)
+and the repository README for setup.
