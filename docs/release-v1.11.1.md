@@ -14,3 +14,11 @@ Six fixes identified in the v1.11.0 code review:
 
 This is a patch to the read-only live connection. It does not enable live CAD,
 assembly, mate, or drawing writes. Existing OAuth configuration is reused.
+
+Acceptance includes a clean-archive install into a fresh Python environment.
+After partial Codex uninstall with `-RemoveRuntime`, the remaining Claude
+launcher still passed live Onshape doctor. A nonexistent-document request
+returned `NOT_FOUND`, with no verified readback. No live model writes occurred.
+
+Final verification: 311 tests passed (25 more than v1.11.0), Ruff passed,
+and skill/plugin validators passed. Regressions were reproduced before fixes.

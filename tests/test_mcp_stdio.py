@@ -334,7 +334,9 @@ def test_timeout_raises_sanitized_error_and_terminates_child(
     fake_mcp_command: list[str], tmp_path: Path
 ) -> None:
     command = command_for(fake_mcp_command, "hang", tmp_path / "trace.jsonl")
-    session = McpStdioSession(command, timeout_seconds=0.1)
+    # The same timeout covers Python startup/initialize. Leave headroom so
+    # this test reaches the intentionally hanging tool even on a busy host.
+    session = McpStdioSession(command, timeout_seconds=2)
 
     with pytest.raises(McpTransportError, match="TRANSPORT_TIMEOUT") as raised:
         with session:
