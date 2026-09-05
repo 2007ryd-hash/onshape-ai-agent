@@ -8,7 +8,10 @@ skill, specialist agent contracts, deterministic Python runtime, run artifacts,
 and installation scripts. It does **not** require an OpenAI or Anthropic API
 key.
 
-## V1.11.0 scope
+## V1.11.1 scope
+
+V1.11.1 corrects partial-host uninstall, XDG OAuth paths, MCP error reporting,
+repeated-number geometry validation, and unresolved-dimension policy checks.
 
 - one shared CAD skill for Codex and Claude Code;
 - Engineering, CAD, Drawing, and Visual QA specialist definitions;
@@ -155,6 +158,8 @@ login still produces a simulated result, not a live Onshape bracket.
 The uninstaller removes only installations carrying this repository's ownership
 marker. It preserves unrelated user skills and agents. Add `-RemoveRuntime`
 only when you also want to delete this clone's `.venv`.
+When another owned host skill remains installed, the shared state and runtime
+are preserved even with `-RemoveRuntime`, so that host can still start.
 
 ## Develop and test
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .contracts import (
     CadAction,
+    DesignValue,
     ExecutionMode,
     ExecutionPlan,
     OnshapeScope,
@@ -61,14 +62,10 @@ def validate_and_order(plan: ExecutionPlan) -> list[CadAction]:
         else ALLOWED_OPERATIONS
     )
 
-    for assumption in plan.assumptions:
-        if assumption.status is ValueStatus.ASSUMPTION and not assumption.approved:
-            raise PolicyDenied(
-                "UNAPPROVED_ASSUMPTION",
-                "An assumption must be approved before CAD execution.",
-            )
+    _validate_design_values(plan.assumptions)
 
     for action in plan.actions:
+        _validate_design_values(action.parameters)
         if action.type not in allowed_operations:
             raise PolicyDenied(
                 "OPERATION_NOT_ALLOWED",
@@ -108,6 +105,36 @@ def validate_and_order(plan: ExecutionPlan) -> list[CadAction]:
     if len(ordered) != len(plan.actions):
         raise PolicyDenied("ACTION_CYCLE", "Action dependencies contain a cycle.")
     return ordered
+
+
+def _validate_design_values(value: object) -> None:
+    """Check typed values and their JSON forms, including nested dimensions."""
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, (DesignValue, dict, list, tuple)) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, (list, tuple)):
+            pending.extend(node)
+            continue
+        status = node.status if isinstance(node, DesignValue) else node.get("status")
+        approved = (
+            node.approved if isinstance(node, DesignValue) else node.get("approved")
+        )
+        if status in (ValueStatus.UNKNOWN, ValueStatus.NEEDS_CONFIRMATION):
+            raise PolicyDenied(
+                "UNRESOLVED_REQUIREMENT",
+                "Unknown or unconfirmed values must be resolved before CAD execution.",
+            )
+        if status == ValueStatus.ASSUMPTION and approved is not True:
+            raise PolicyDenied(
+                "UNAPPROVED_ASSUMPTION",
+                "An assumption must be approved before CAD execution.",
+            )
+        if isinstance(node, dict):
+            pending.extend(node.values())
 
 
 def _validate_live_scope(scope: OnshapeScope | None) -> None:

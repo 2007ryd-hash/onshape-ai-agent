@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "onshape-engineering-agent",
   "displayName": "Onshape Engineering Agent",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "description": "Supervised, artifact-driven engineering-to-Onshape automation foundation.",
   "author": {
     "name": "2007ryd-hash",

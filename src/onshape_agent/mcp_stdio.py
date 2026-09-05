@@ -209,7 +209,7 @@ class McpStdioSession:
                     "capabilities": {},
                     "clientInfo": {
                         "name": "onshape-agent",
-                        "version": "1.11.0",
+                        "version": "1.11.1",
                     },
                 },
             }
@@ -339,6 +339,29 @@ class McpStdioSession:
     def _decode_tool_result(
         result: dict[str, Any], *, network_request_sent: bool = True
     ) -> object:
+        if result.get("isError") is True:
+            error_code = "MCP_ERROR"
+            content = result.get("content")
+            if isinstance(content, list) and len(content) == 1:
+                block = content[0]
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        # onshape-mcp 0.5.2 adds this prefix itself. Never
+                        # infer HTTP status from the untrusted response body.
+                        for status, code in (
+                            (401, "AUTH_REQUIRED"),
+                            (403, "SCOPE_DENIED"),
+                            (404, "NOT_FOUND"),
+                            (429, "RATE_LIMITED"),
+                        ):
+                            if text.startswith(f"API error (HTTP {status}): "):
+                                error_code = code
+                                break
+            raise McpTransportError(
+                error_code, network_request_sent=network_request_sent
+            )
+
         if "structuredContent" in result:
             return result["structuredContent"]
 

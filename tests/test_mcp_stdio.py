@@ -21,6 +21,49 @@ from onshape_agent.mcp_stdio import (
 FAKE_SERVER = Path(__file__).with_name("fake_mcp_server.py")
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"isError": True, "structuredContent": {"items": []}},
+        {
+            "isError": True,
+            "content": [{"type": "text", "text": '{"items":[]}'}],
+        },
+    ],
+)
+def test_tool_error_cannot_decode_as_success(result: dict[str, object]) -> None:
+    with pytest.raises(McpTransportError) as raised:
+        McpStdioSession._decode_tool_result(result)
+
+    assert raised.value.code == "MCP_ERROR"
+    assert raised.value.network_request_sent is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_code"),
+    [
+        ("API error (HTTP 401): private-body", "AUTH_REQUIRED"),
+        ("API error (HTTP 403): private-body", "SCOPE_DENIED"),
+        ("API error (HTTP 404): private-body", "NOT_FOUND"),
+        ("API error (HTTP 429): private-body", "RATE_LIMITED"),
+        ("API error (HTTP 500): private-body HTTP 401", "MCP_ERROR"),
+        ("private-body: API error (HTTP 403): denied", "MCP_ERROR"),
+        ('{"status": 401, "message": "private-body"}', "MCP_ERROR"),
+    ],
+)
+def test_tool_error_maps_only_pinned_http_prefix(
+    text: str, expected_code: str
+) -> None:
+    result = {"isError": True, "content": [{"type": "text", "text": text}]}
+
+    with pytest.raises(McpTransportError) as raised:
+        McpStdioSession._decode_tool_result(result)
+
+    assert raised.value.code == expected_code
+    assert str(raised.value) == expected_code
+    assert raised.value.network_request_sent is True
+
+
 @pytest.fixture
 def fake_mcp_command() -> list[str]:
     return [sys.executable, str(FAKE_SERVER)]

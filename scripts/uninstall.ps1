@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'onshape-paths.ps1')
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 if ([string]::IsNullOrWhiteSpace($CodexHome)) { $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' } }
 if ([string]::IsNullOrWhiteSpace($ClaudeConfigDir)) { $ClaudeConfigDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' } }
@@ -143,14 +144,34 @@ if ($HostTarget -in @('claude', 'all')) {
         Add-UninstallTarget $agentMarkerPath 'marker'
     }
 }
-if ($RemoveRuntime) {
+$statePath = Get-AbsolutePath (Join-Path $StateDir 'install.json')
+$state = Read-Marker $statePath
+$stateOwned = ($null -ne $state) -and ([string]$state.repo_root -eq $repoRoot)
+# Shared state/runtime must outlive any owned host skill that is not removed.
+# Inspect recorded destinations as well as the current host roots, so custom
+# install locations do not need to be repeated for the untouched host.
+$skillCandidates = @(
+    (Join-Path $CodexHome 'skills\onshape-engineering'),
+    (Join-Path $ClaudeConfigDir 'skills\onshape-engineering')
+)
+if ($stateOwned) { $skillCandidates += @($state.installed_paths) }
+$remainingOwnedSkills = @()
+foreach ($candidate in @($skillCandidates | Select-Object -Unique)) {
+    if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+    $candidatePath = Get-AbsolutePath ([string]$candidate)
+    if (@($script:UninstallTargets | Where-Object { $_.Path -eq $candidatePath }).Count -gt 0) { continue }
+    if (-not (Test-Path -LiteralPath $candidatePath -PathType Container)) { continue }
+    $owner = Read-Marker "$candidatePath.onshape-agent-owner.json"
+    if (($null -ne $owner) -and ([string]$owner.repo_root -eq $repoRoot)) {
+        $remainingOwnedSkills += $candidatePath
+    }
+}
+$sharedRuntimeRequired = $remainingOwnedSkills.Count -gt 0
+if ($RemoveRuntime -and (-not $sharedRuntimeRequired)) {
     $runtimePath = Get-AbsolutePath (Join-Path $repoRoot '.venv')
     if (Test-Path -LiteralPath $runtimePath) { Add-UninstallTarget $runtimePath 'runtime' }
 }
-
-$statePath = Get-AbsolutePath (Join-Path $StateDir 'install.json')
-$state = Read-Marker $statePath
-if (($null -ne $state) -and ([string]$state.repo_root -eq $repoRoot)) {
+if ($stateOwned -and (-not $sharedRuntimeRequired)) {
     Add-UninstallTarget $statePath 'state'
 }
 
@@ -188,17 +209,20 @@ try {
     throw $failure
 }
 
-$appDataRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME 'AppData\Roaming' }
-$localAppDataRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\Local' }
 $preservedPaths = @(
-    (Join-Path $appDataRoot 'onshape-mcp\config.toml'),
-    (Join-Path $localAppDataRoot 'onshape-mcp\tokens.json')
+    (Get-OnshapeConfigPath),
+    (Get-OnshapeTokenPath)
 )
+if ($sharedRuntimeRequired) {
+    if ($stateOwned) { $preservedPaths += $statePath }
+    if (Test-Path -LiteralPath (Join-Path $repoRoot '.venv')) { $preservedPaths += Get-AbsolutePath (Join-Path $repoRoot '.venv') }
+}
 @{
     status = 'UNINSTALLED'
     host_target = $HostTarget
     removed_paths = @($removed)
     preserved_paths = $preservedPaths
     cleanup_warnings = @($cleanupWarnings)
+    shared_runtime_required = [bool]$sharedRuntimeRequired
     message = 'Upstream onshape-mcp config and tokens are preserved by default.'
 } | ConvertTo-Json -Depth 4 -Compress

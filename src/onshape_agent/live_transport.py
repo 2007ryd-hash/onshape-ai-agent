@@ -918,6 +918,9 @@ def _contains_error_marker(
 ) -> bool:
     """Detect error-shaped response nodes without serialising their payload."""
 
+    # Repeated scalar values (notably JSON integers 0 and 1) are not cycles.
+    if not isinstance(value, (Mapping, list)):
+        return False
     if _seen is None:
         _seen = set()
     marker = id(value)

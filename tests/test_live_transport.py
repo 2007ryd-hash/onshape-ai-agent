@@ -77,6 +77,25 @@ def test_auth_status_forces_validation_and_returns_safe_receipt() -> None:
     assert receipt.evidence_summary == {"response_present": True}
 
 
+def test_mass_properties_repeated_integer_coordinates_are_valid(
+    scoped_scope: OnshapeScope,
+) -> None:
+    import json
+
+    response = json.loads('{"bodies":{"b1":{"mass":[1,1,1],"centroid":[0,0,0]}}}')
+    session = FakeSession({"onshape_api_call": response})
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("mass_properties")
+    assert receipt.status == "SUCCEEDED"
+    assert receipt.readback_verified is True
+    assert receipt.evidence_summary == {"body_count": 1}
+
+
+def test_error_marker_detects_actual_container_cycle() -> None:
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    assert live_transport._contains_error_marker(cyclic) is True
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -571,17 +590,15 @@ def test_root_error_status_rejects_success_shaped_responses(
     document_session = FakeSession(
         {"onshape_api_call": {"status": status, "id": "doc-123"}}
     )
-    document_receipt = OnshapeMcpReadTransport(
-        document_session, scoped_scope
-    ).read("get_document", {})
+    document_receipt = OnshapeMcpReadTransport(document_session, scoped_scope).read(
+        "get_document", {}
+    )
     assert document_receipt.status == "FAILED"
 
     auth_session = FakeSession(
         {"onshape_auth_status": {"status": status, "authenticated": True}}
     )
-    auth_receipt = OnshapeMcpReadTransport(
-        auth_session, OnshapeScope()
-    ).auth_status()
+    auth_receipt = OnshapeMcpReadTransport(auth_session, OnshapeScope()).auth_status()
     assert auth_receipt.status == "FAILED"
 
 
@@ -924,9 +941,7 @@ def test_live_receipt_uses_mcp_error_network_request_state(
         }
     )
 
-    receipt = OnshapeMcpReadTransport(session, scoped_scope).read(
-        "get_document", {}
-    )
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
     assert_failed_receipt(receipt, "TRANSPORT_TIMEOUT", network_request_sent=False)
     assert receipt.network_request_sent is False
@@ -943,8 +958,6 @@ def test_live_receipt_marks_mcp_error_after_write_as_network_sent(
         }
     )
 
-    receipt = OnshapeMcpReadTransport(session, scoped_scope).read(
-        "get_document", {}
-    )
+    receipt = OnshapeMcpReadTransport(session, scoped_scope).read("get_document", {})
 
     assert_failed_receipt(receipt, "TRANSPORT_TIMEOUT")

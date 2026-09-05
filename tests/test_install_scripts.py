@@ -78,9 +78,25 @@ def _fake_tools(
     return bin_dir, trace_path
 
 
+def _isolated_environment(tmp_path: Path) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "CODEX_HOME": str(tmp_path / "isolated-codex"),
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "isolated-claude"),
+            "APPDATA": str(tmp_path / "isolated-appdata"),
+            "LOCALAPPDATA": str(tmp_path / "isolated-localappdata"),
+            "ONSHAPE_AGENT_STATE_DIR": str(tmp_path / "isolated-state"),
+        }
+    )
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "ONSHAPE_MCP_CONFIG_DIR"):
+        environment.pop(name, None)
+    return environment
+
+
 def _with_fake_npx(tmp_path: Path) -> tuple[dict[str, str], Path]:
     bin_dir, trace_path = _fake_tools(tmp_path)
-    environment = dict(os.environ)
+    environment = _isolated_environment(tmp_path)
     environment["PATH"] = f"{bin_dir}{os.pathsep}{environment['PATH']}"
     environment["FAKE_NPX_TRACE"] = str(trace_path)
     return environment, trace_path
@@ -102,7 +118,7 @@ def _with_fake_tools(
         include_node=include_node,
         npx_exit_code=npx_exit_code,
     )
-    environment = dict(os.environ)
+    environment = _isolated_environment(tmp_path)
     environment["PATH"] = (
         str(bin_dir)
         if only_fake_path
@@ -941,6 +957,119 @@ def test_install_script_uses_one_atomic_json_writer_for_state_and_markers() -> N
     assert install.count("function Write-JsonAtomic") == 1
     assert "Write-JsonAtomic $marker" in install
     assert "Write-JsonAtomic $statePath" in install
+
+
+@pytest.mark.parametrize("removed_host", ["codex", "claude"])
+@pytest.mark.parametrize("remove_runtime", [False, True])
+def test_partial_uninstall_preserves_remaining_host_state_and_runtime(
+    tmp_path: Path, removed_host: str, remove_runtime: bool
+) -> None:
+    # Keep every deletion target in a miniature repository, including .venv.
+    mini_repo = tmp_path / "repo"
+    shutil.copytree(REPO_ROOT / "scripts", mini_repo / "scripts")
+    runtime = mini_repo / ".venv"
+    runtime.mkdir()
+    sentinel = runtime / "keep-runtime.txt"
+    sentinel.write_text("runtime", encoding="utf-8")
+    codex_home, claude_home = tmp_path / "codex", tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    paths = []
+    for home in (codex_home, claude_home):
+        destination = home / "skills" / "onshape-engineering"
+        destination.mkdir(parents=True)
+        Path(f"{destination}.onshape-agent-owner.json").write_text(
+            json.dumps({"repo_root": str(mini_repo)}), encoding="utf-8"
+        )
+        paths.append(destination)
+    state_path = state_dir / "install.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "repo_root": str(mini_repo),
+                "python_path": sys.executable,
+                "host_target": "all",
+                "installed_paths": [str(path) for path in paths],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_before = state_path.read_bytes()
+    args = [
+        "-HostTarget",
+        removed_host,
+        "-CodexHome",
+        str(codex_home if removed_host == "codex" else tmp_path / "unused-codex"),
+        "-ClaudeConfigDir",
+        str(claude_home if removed_host == "claude" else tmp_path / "unused-claude"),
+        "-StateDir",
+        str(state_dir),
+    ]
+    if remove_runtime:
+        args.append("-RemoveRuntime")
+    result = _run_script("uninstall.ps1", *args, repo_root=mini_repo)
+    assert result.returncode == 0, result.stderr
+    removed_index = 0 if removed_host == "codex" else 1
+    assert not paths[removed_index].exists()
+    assert paths[1 - removed_index].is_dir()
+    assert state_path.is_file(), "remaining host still requires shared install.json"
+    assert state_path.read_bytes() == state_before
+    assert sentinel.read_text(encoding="utf-8") == "runtime"
+    assert json.loads(result.stdout)["shared_runtime_required"] is True
+
+    # The final host removal must still be able to clean up shared resources.
+    final = _run_script(
+        "uninstall.ps1",
+        "-HostTarget",
+        "claude" if removed_host == "codex" else "codex",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+        "-RemoveRuntime",
+        repo_root=mini_repo,
+    )
+    assert final.returncode == 0, final.stderr
+    assert not state_path.exists()
+    assert not runtime.exists()
+
+
+@pytest.mark.parametrize("absolute_override", [True, False])
+def test_configure_and_install_presence_follow_xdg_paths(
+    tmp_path: Path, absolute_override: bool
+) -> None:
+    environment, _, _ = _with_fake_tools(tmp_path)
+    appdata, localappdata = tmp_path / "appdata", tmp_path / "localappdata"
+    xdg_config, xdg_data = tmp_path / "xdg-config", tmp_path / "xdg-data"
+    environment.update(
+        {
+            "APPDATA": str(appdata),
+            "LOCALAPPDATA": str(localappdata),
+            "XDG_CONFIG_HOME": str(xdg_config)
+            if absolute_override
+            else "relative-config",
+            "XDG_DATA_HOME": str(xdg_data) if absolute_override else "relative-data",
+        }
+    )
+    state_dir = _install_for_setup(tmp_path, environment)
+    result = _run_script(
+        "configure-onshape.ps1",
+        env=environment,
+        input_text="fake-id\nfake-secret\n",
+    )
+    assert result.returncode == 0, result.stderr
+    config_root = xdg_config if absolute_override else appdata
+    token_root = xdg_data if absolute_override else localappdata
+    assert (config_root / "onshape-mcp" / "config.toml").is_file()
+    token_path = token_root / "onshape-mcp" / "tokens.json"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("{}", encoding="utf-8")
+    _install_for_setup(tmp_path, environment)
+    state = json.loads((state_dir / "install.json").read_text(encoding="utf-8"))
+    assert state["config_present"] is True
+    assert state["tokens_present"] is True
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,6 @@
 # Onshape authentication on Windows
 
-V1.11.0 uses the pinned upstream `onshape-mcp@0.5.2` process for OAuth and
+V1.11.1 uses the pinned upstream `onshape-mcp@0.5.2` process for OAuth and
 read-only Onshape requests. The host supplies the language model; this project
 does not require an OpenAI or Anthropic API key.
 
@@ -61,6 +61,11 @@ Default Windows locations are:
 | Agent installation metadata | `%LOCALAPPDATA%\onshape-engineering-agent\install.json` |
 | Upstream OAuth configuration | `%APPDATA%\onshape-mcp\config.toml` |
 | Upstream OAuth tokens | `%LOCALAPPDATA%\onshape-mcp\tokens.json` |
+
+Absolute `XDG_CONFIG_HOME` and `XDG_DATA_HOME` override the upstream config
+and token base directories respectively, including on Windows. Relative XDG
+values are ignored. Configuration, installation checks, and login use the
+same paths; the agent installation metadata path is separate.
 
 The upstream configuration contains your client secret, and tokens are also
 sensitive. Keep these files out of the repository and shared diagnostics.

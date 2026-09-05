@@ -109,14 +109,14 @@ the side-effect boundary. Include:
 - whether geometry was deterministically read back, visually observed, or only
   simulated.
 
-For v1.11.0, the included simple-bracket example is `simulated`, uses
+For v1.11.1, the included simple-bracket example is `simulated`, uses
 the recording transport, and sends no network request. Never describe a
 simulated result as a live Onshape modification. A `live` label is permitted
 only when a configured, authorized transport reports a real request and the
 read-back evidence is present; otherwise state `simulated` or
 `not_configured` and stop at the safe boundary.
 
-## Live connection (Windows, v1.11.0)
+## Live connection (Windows, v1.11.1)
 
 Use the installed launcher `scripts/onshape-agent.ps1`:
 

@@ -74,9 +74,7 @@ class FakeLiveTransport:
         if not self.receipts:
             read_kind = action.parameters.get("read_kind")
             return TransportReceipt(
-                operation=(
-                    read_kind if isinstance(read_kind, str) else action.type
-                ),
+                operation=(read_kind if isinstance(read_kind, str) else action.type),
                 status="SUCCEEDED",
                 network_request_sent=True,
                 readback_verified=True,
@@ -125,6 +123,72 @@ def test_delete_workspace_is_denied_before_transport_dispatch() -> None:
     assert report.code == "OPERATION_NOT_ALLOWED"
     assert report.network_request_sent is False
     assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "status", [ValueStatus.UNKNOWN, ValueStatus.NEEDS_CONFIRMATION]
+)
+@pytest.mark.parametrize("approved", [False, True])
+def test_unresolved_assumptions_never_dispatch(
+    status: ValueStatus, approved: bool
+) -> None:
+    transport = RecordingTransport()
+    plan = make_plan(
+        CadAction(action_id="hole", type="ensure_hole", semantic_id="hole")
+    )
+    plan.assumptions = [
+        DesignValue(value=None, unit="mm", status=status, approved=approved)
+    ]
+    report = CadGateway(transport).execute(plan)
+    assert report.status == "DENIED"
+    assert report.code == "UNRESOLVED_REQUIREMENT"
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("status", ["UNKNOWN", "NEEDS_CONFIRMATION", "ASSUMPTION"])
+def test_unapproved_nested_dimensions_never_dispatch(status: str) -> None:
+    transport = RecordingTransport()
+    plan = make_plan(
+        CadAction(
+            action_id="hole",
+            type="ensure_hole",
+            semantic_id="hole",
+            parameters={
+                "holes": [
+                    {
+                        "diameter": {
+                            "value": 10,
+                            "unit": "mm",
+                            "status": status,
+                            "approved": False,
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    assert CadGateway(transport).execute(plan).status == "DENIED"
+    assert transport.calls == []
+
+
+def test_approved_nested_assumption_can_dispatch() -> None:
+    transport = RecordingTransport()
+    plan = make_plan(
+        CadAction(
+            action_id="hole",
+            type="ensure_hole",
+            semantic_id="hole",
+            parameters={
+                "diameter": DesignValue(
+                    value=10,
+                    unit="mm",
+                    status=ValueStatus.ASSUMPTION,
+                    approved=True,
+                )
+            },
+        )
+    )
+    assert CadGateway(transport).execute(plan).status == "EXECUTED"
 
 
 def test_unknown_operation_is_denied() -> None:
@@ -441,8 +505,9 @@ def test_read_returns_failed_receipt_after_mcp_call_error(
     assert len(session.calls) == 1
 
 
-def test_gateway_preserves_network_sent_when_live_receipt_reports_call_failure(
-) -> None:
+def test_gateway_preserves_network_sent_when_live_receipt_reports_call_failure() -> (
+    None
+):
     session = FakeMcpSession(
         [McpTransportError("TRANSPORT_TIMEOUT", network_request_sent=True)]
     )

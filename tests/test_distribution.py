@@ -13,7 +13,7 @@ from onshape_agent.contracts import ApprovalStatus, ArtifactType
 from onshape_agent.runlog import RunLog
 
 PLUGIN_NAME = "onshape-engineering-agent"
-PLUGIN_VERSION = "1.11.0"
+PLUGIN_VERSION = "1.11.1"
 REPOSITORY = "https://github.com/2007ryd-hash/onshape-ai-agent"
 SKILL_NAME = "onshape-engineering"
 SKILL_ROOT_PARTS = (

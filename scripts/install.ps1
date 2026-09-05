@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'onshape-paths.ps1')
 $script:OnshapeMcpVersion = '0.5.2'
 $script:OnshapeMcpPackage = 'onshape-mcp@0.5.2'
 $script:OnshapeMcpCommand = @('npx.cmd', '--yes', $script:OnshapeMcpPackage)
@@ -63,16 +64,6 @@ function Test-OnshapeMcpPackage([object]$npx) {
     if ($versionExitCode -ne 0) { return $false }
     $versionText = ($versionOutput | ForEach-Object { [string]$_ }) -join "`n"
     return [regex]::IsMatch($versionText, '(?m)^\s*(?:onshape-mcp\s+)?v?0\.5\.2\s*$')
-}
-
-function Get-OnshapeConfigPath() {
-    $appDataRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME 'AppData\Roaming' }
-    return Join-Path $appDataRoot 'onshape-mcp\config.toml'
-}
-
-function Get-OnshapeTokenPath() {
-    $localAppDataRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\Local' }
-    return Join-Path $localAppDataRoot 'onshape-mcp\tokens.json'
 }
 
 $npxCommand = Assert-NodeAndNpx

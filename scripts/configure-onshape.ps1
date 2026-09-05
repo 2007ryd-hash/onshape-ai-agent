@@ -2,6 +2,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'onshape-paths.ps1')
 $script:OnshapeMcpVersion = '0.5.2'
 $script:OnshapeMcpPackage = 'onshape-mcp@0.5.2'
 $script:OnshapeCallback = 'http://localhost:18338/callback'
@@ -115,8 +116,7 @@ try {
     }
     if ([string]::IsNullOrEmpty($clientSecret)) { throw 'Client secret cannot be empty' }
 
-    $appDataRoot = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME 'AppData\Roaming' }
-    $configPath = Join-Path $appDataRoot 'onshape-mcp\config.toml'
+    $configPath = Get-OnshapeConfigPath
     $payloadJson = @{
         client_id = $clientId
         client_secret = $clientSecret
