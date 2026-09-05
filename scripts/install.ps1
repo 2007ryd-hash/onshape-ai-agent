@@ -62,7 +62,7 @@ function Test-OnshapeMcpPackage([object]$npx) {
     }
     if ($versionExitCode -ne 0) { return $false }
     $versionText = ($versionOutput | ForEach-Object { [string]$_ }) -join "`n"
-    return [regex]::IsMatch($versionText, '(?m)^\s*v?0\.5\.2\s*$')
+    return [regex]::IsMatch($versionText, '(?m)^\s*(?:onshape-mcp\s+)?v?0\.5\.2\s*$')
 }
 
 function Get-OnshapeConfigPath() {
@@ -155,14 +155,21 @@ function Invoke-TransactionRollback() {
 }
 
 function Invoke-TransactionCommit() {
-    if ($env:ONSHAPE_AGENT_TEST_FAIL_COMMIT_CLEANUP -eq '1') {
-        throw 'Injected transaction commit cleanup failure'
-    }
+    $cleanupWarnings = @()
+    $failureIndex = if ($env:ONSHAPE_AGENT_TEST_FAIL_COMMIT_CLEANUP -eq '1') { 1 } else { -1 }
+    $index = 0
     foreach ($entry in @($script:TransactionEntries)) {
-        if (Test-Path -LiteralPath $entry.BackupPath) { Remove-InstalledPath $entry.BackupPath }
+        try {
+            if ($index -eq $failureIndex) { throw 'Injected transaction backup cleanup failure' }
+            if (Test-Path -LiteralPath $entry.BackupPath) { Remove-InstalledPath $entry.BackupPath }
+        } catch {
+            $cleanupWarnings += "Unable to remove transaction backup $($entry.BackupPath): $($_.Exception.Message)"
+        }
+        $index++
     }
     $script:TransactionEntries = @()
     $script:TransactionCreated = @()
+    return @($cleanupWarnings)
 }
 
 function Assert-DirectoryTarget([string]$path) {
@@ -261,6 +268,11 @@ $claudeSources = @(Get-ChildItem -LiteralPath $agentSource -Filter '*-agent.md' 
 if (-not (Test-Path -LiteralPath $skillSource -PathType Container)) { throw "Skill source is missing: $skillSource" }
 if (-not (Test-Path -LiteralPath $agentSource -PathType Container)) { throw "Agent source is missing: $agentSource" }
 $claudeTargets = @($claudeSources | ForEach-Object { Join-Path $claudeAgentRoot "onshape-engineering-$($_.Name)" })
+$statePath = Join-Path $StateDir 'install.json'
+$stateOwner = Get-OwnerRepo $statePath
+if ((Test-Path -LiteralPath $statePath -PathType Leaf) -and ($stateOwner -ne $repoRoot) -and (-not $Force)) {
+    throw "Install state is not owned by this project: $statePath"
+}
 
 $pathsToBackup = @()
 if ($HostTarget -in @('codex', 'all')) {
@@ -317,7 +329,6 @@ try {
         if ($env:ONSHAPE_AGENT_TEST_FAIL_HOST -eq 'claude') { throw 'Injected host installation failure: claude' }
     }
 
-    $statePath = Join-Path $StateDir 'install.json'
     Add-TransactionBackup $statePath
     Add-TransactionCreated $statePath
     New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
@@ -338,8 +349,8 @@ try {
     if ($env:ONSHAPE_AGENT_TEST_FAIL_AFTER_STATE_WRITE -eq '1') {
         throw 'Injected failure after state write'
     }
-    Invoke-TransactionCommit
     $transactionCommitted = $true
+    $cleanupWarnings = @(Invoke-TransactionCommit)
     $nextSteps = @(
         'Run scripts/configure-onshape.ps1 to save your user-owned OAuth settings.',
         'Run scripts/login-onshape.ps1 to explicitly authorize the pinned Onshape MCP.',
@@ -354,6 +365,7 @@ try {
         mcp_package = $script:OnshapeMcpPackage
         mcp_version = $script:OnshapeMcpVersion
         mcp_present = [bool]$mcpPresent
+        cleanup_warnings = @($cleanupWarnings)
         next_steps = $nextSteps
     } | ConvertTo-Json -Depth 5 -Compress
 } catch {

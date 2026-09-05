@@ -8,14 +8,28 @@ session is opened only when one of the explicit live methods is called.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, Protocol
+from uuid import uuid4
 
-from .contracts import OnshapeScope, StrictModel, TransportReceipt
+from .contracts import (
+    ArtifactType,
+    CadAction,
+    ExecutionMode,
+    ExecutionPlan,
+    GatewayReport,
+    OnshapeScope,
+    RunState,
+    StrictModel,
+    TransportReceipt,
+)
+from .gateway import CadGateway
 from .live_transport import OnshapeMcpReadTransport
 from .mcp_stdio import McpStdioSession, McpTransportError
+from .runlog import RunLog
 
 LIVE_MCP_COMMAND = ("npx.cmd", "--yes", "onshape-mcp@0.5.2")
 DEFAULT_MCP_TIMEOUT_SECONDS = 10.0
@@ -26,7 +40,8 @@ class LocalAuthStatus(StrictModel):
 
     status: Literal["READY_LOCAL", "AUTH_REQUIRED", "NOT_CONFIGURED"]
     configured: bool
-    authenticated: bool
+    authenticated: None = None
+    verification: Literal["unverified"] = "unverified"
     config_present: bool
     tokens_present: bool
     network_request_sent: Literal[False] = False
@@ -49,18 +64,24 @@ def open_session(
     return McpStdioSession(list(LIVE_MCP_COMMAND), timeout_seconds=timeout_seconds)
 
 
-def _default_config_root() -> Path:
-    configured_root = os.environ.get("ONSHAPE_MCP_CONFIG_DIR")
-    if configured_root and configured_root.strip():
-        return Path(configured_root)
-
-    appdata = os.environ.get("APPDATA")
-    if appdata and appdata.strip():
-        return Path(appdata) / "onshape-mcp"
-
-    if os.name == "nt":
-        return Path.home() / "AppData" / "Roaming" / "onshape-mcp"
-    return Path.home() / ".config" / "onshape-mcp"
+def _default_root(*, data: bool) -> Path:
+    # Mirrors onshape-mcp v0.5.2 config.rs / oauth.rs: absolute XDG
+    # overrides take precedence even on Windows; relative ones are ignored.
+    xdg = os.environ.get("XDG_DATA_HOME" if data else "XDG_CONFIG_HOME")
+    if xdg and Path(xdg).is_absolute():
+        base = Path(xdg)
+    elif sys.platform == "win32":
+        value = os.environ.get("LOCALAPPDATA" if data else "APPDATA")
+        base = (
+            Path(value)
+            if value
+            else Path.home() / "AppData" / ("Local" if data else "Roaming")
+        )
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path.home() / (".local/share" if data else ".config")
+    return base / "onshape-mcp"
 
 
 def _presence(path: Path) -> bool:
@@ -70,44 +91,26 @@ def _presence(path: Path) -> bool:
         return False
 
 
-def _tokens_present(config_root: Path) -> bool:
-    """Detect token-file presence by names only; never inspect file contents."""
-
-    known_names = (
-        "tokens.json",
-        "token.json",
-        ".tokens.json",
-        ".token.json",
-        "tokens.toml",
-        "token.toml",
-        "tokens",
-        "token",
-    )
-    for name in known_names:
-        if _presence(config_root / name):
-            return True
-
-    try:
-        children = config_root.iterdir()
-    except OSError:
-        return False
-    try:
-        for child in children:
-            if child.is_file() and "token" in child.name.lower():
-                return True
-    except OSError:
-        return False
-    return False
-
-
 def inspect_local_auth(
     config_root: Path | str | None = None,
+    *,
+    data_root: Path | str | None = None,
 ) -> LocalAuthStatus:
-    """Return local config/token presence without reading either file."""
+    """Return presence only; authentication always remains unverified.
 
-    root = Path(config_root) if config_root is not None else _default_config_root()
+    Explicit roots (and the legacy local-inspection override) support isolated
+    diagnostics. They do not configure the upstream process.
+    """
+
+    override = config_root or os.environ.get("ONSHAPE_MCP_CONFIG_DIR")
+    root = Path(override) if override else _default_root(data=False)
+    token_root = (
+        Path(data_root)
+        if data_root is not None
+        else (Path(override) if override else _default_root(data=True))
+    )
     config_present = _presence(root / "config.toml")
-    tokens_present = _tokens_present(root)
+    tokens_present = _presence(token_root / "tokens.json")
     if config_present and tokens_present:
         status: Literal["READY_LOCAL", "AUTH_REQUIRED", "NOT_CONFIGURED"] = (
             "READY_LOCAL"
@@ -119,7 +122,6 @@ def inspect_local_auth(
     return LocalAuthStatus(
         status=status,
         configured=config_present,
-        authenticated=tokens_present,
         config_present=config_present,
         tokens_present=tokens_present,
     )
@@ -128,10 +130,16 @@ def inspect_local_auth(
 class LiveService:
     """Perform explicit authentication and bounded read-only live operations."""
 
-    def __init__(self, *, session_factory: SessionFactory | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        session_factory: SessionFactory | None = None,
+        output_root: Path = Path("runs"),
+    ) -> None:
         # Resolve the module function at construction time so tests and callers
         # can inject a deterministic fake by replacing ``open_session``.
         self._session_factory = session_factory or open_session
+        self._output_root = Path(output_root)
 
     def auth_status(self) -> TransportReceipt:
         """Validate the existing login through ``validate=true``."""
@@ -139,7 +147,7 @@ class LiveService:
         return self._run(
             "auth_status",
             OnshapeScope(),
-            lambda transport: transport.auth_status(),
+            {},
         )
 
     def list_documents(self, limit: int = 1) -> TransportReceipt:
@@ -154,7 +162,7 @@ class LiveService:
         return self._run(
             "list_documents",
             OnshapeScope(),
-            lambda transport: transport.read("list_documents", {"limit": limit}),
+            {"limit": limit},
         )
 
     def read_document(self, document_id: str) -> TransportReceipt:
@@ -166,21 +174,82 @@ class LiveService:
         return self._run(
             "get_document",
             scope,
-            lambda transport: transport.read("get_document", {}),
+            {},
         )
 
     def _run(
         self,
         operation: str,
         scope: OnshapeScope,
-        action: Callable[[OnshapeMcpReadTransport], TransportReceipt],
+        parameters: dict[str, object],
     ) -> TransportReceipt:
+        run_id = f"live_{uuid4().hex}"
+        log = RunLog(self._output_root, run_id=run_id)
+        plan = ExecutionPlan(
+            plan_id=run_id,
+            approved_design_hash="read-only-command",
+            target_scope="onshape",
+            execution_mode=ExecutionMode.LIVE,
+            onshape_scope=scope,
+            actions=[
+                CadAction(
+                    action_id="read",
+                    type="read_back",
+                    semantic_id=operation,
+                    parameters={"read_kind": operation, **parameters},
+                )
+            ],
+        )
+        report: GatewayReport | None = None
         try:
             with self._managed_session() as session:
                 transport = OnshapeMcpReadTransport(session, scope)
-                return action(transport)
+                report = CadGateway(transport).execute(plan)
+                if report.status == "EXECUTED":
+                    receipt = report.receipts[0]
+                else:
+                    receipt = TransportReceipt(
+                        operation=operation,
+                        status="FAILED",
+                        network_request_sent=report.network_request_sent,
+                        readback_verified=False,
+                        error_code=report.code,
+                    )
         except Exception as error:
-            return _failed_receipt(operation, error)
+            receipt = _failed_receipt(operation, error)
+            if report is not None and report.network_request_sent:
+                receipt = receipt.model_copy(update={"network_request_sent": True})
+            report = None
+        reference = log.write_artifact(
+            artifact_id="live_execution_report",
+            artifact_type=ArtifactType.EXECUTION_REPORT,
+            producer="live_service",
+            payload=(
+                report.model_dump(mode="json")
+                if report
+                else {"receipt": receipt.model_dump(mode="json")}
+            ),
+        )
+        log.create_manifest(
+            main_model="not_used",
+            reasoning_effort="not_used",
+            execution_metadata={
+                "execution_mode": "live",
+                "transport_name": "onshape-mcp-stdio",
+                "operation": operation,
+                "status": receipt.status,
+                "network_request_sent": receipt.network_request_sent,
+                "readback_verified": receipt.readback_verified,
+                "artifacts": [reference.model_dump(mode="json")],
+            },
+        )
+        log.append_event(
+            actor="live_service",
+            stage=RunState.CAD_EXECUTION,
+            event="LIVE_OPERATION_COMPLETED",
+            details=receipt.model_dump(mode="json"),
+        )
+        return receipt
 
     @contextmanager
     def _managed_session(self) -> Iterator[_SessionLike]:

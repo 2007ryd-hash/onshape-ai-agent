@@ -65,15 +65,13 @@ def _fake_tools(
     trace_path = tmp_path / "npx-args.txt"
     if include_node:
         (bin_dir / "node.cmd").write_text(
-            "@echo off\r\n"
-            f"if \"%~1\"==\"--version\" echo {node_version}\r\n"
-            "exit /b 0\r\n",
+            f'@echo off\r\nif "%~1"=="--version" echo {node_version}\r\nexit /b 0\r\n',
             encoding="ascii",
         )
     (bin_dir / "npx.cmd").write_text(
         "@echo off\r\n"
-        ">\"%FAKE_NPX_TRACE%\" echo %*\r\n"
-        f"if \"%~3\"==\"--version\" echo {npx_version}\r\n"
+        '>"%FAKE_NPX_TRACE%" echo %*\r\n'
+        f'if "%~3"=="--version" echo onshape-mcp {npx_version}\r\n'
         f"exit /b {npx_exit_code}\r\n",
         encoding="ascii",
     )
@@ -172,11 +170,7 @@ def test_install_all_hosts_and_runner_work_offline(tmp_path: Path) -> None:
     assert Path(state["python_path"]).is_file()
 
     runner = (
-        codex_home
-        / "skills"
-        / "onshape-engineering"
-        / "scripts"
-        / "onshape-agent.ps1"
+        codex_home / "skills" / "onshape-engineering" / "scripts" / "onshape-agent.ps1"
     )
     command = [
         POWERSHELL,
@@ -267,9 +261,7 @@ def test_setup_scripts_pin_safe_onshape_command_and_callback() -> None:
         encoding="utf-8"
     )
     login = (REPO_ROOT / "scripts" / "login-onshape.ps1").read_text(encoding="utf-8")
-    launcher = (REPO_ROOT / "scripts" / "onshape-agent.ps1").read_text(
-        encoding="utf-8"
-    )
+    launcher = (REPO_ROOT / "scripts" / "onshape-agent.ps1").read_text(encoding="utf-8")
 
     assert "npx.cmd" in configure
     assert "npx.cmd" in login
@@ -277,9 +269,9 @@ def test_setup_scripts_pin_safe_onshape_command_and_callback() -> None:
     assert "onshape-mcp@0.5.2" in login
     assert "http://localhost:18338/callback" in configure
     assert "-AsSecureString" in configure
-    assert "clientsecret" not in configure.lower().split("param", 1)[-1].split(
-        ")", 1
-    )[0]
+    assert (
+        "clientsecret" not in configure.lower().split("param", 1)[-1].split(")", 1)[0]
+    )
     assert "Write-JsonAtomic" not in configure
     assert "PYTHONPATH" in launcher
     assert "onshape_agent.onshape_config" in configure
@@ -429,6 +421,289 @@ def test_uninstall_preserves_upstream_config_and_tokens(tmp_path: Path) -> None:
     assert "preserve" in uninstall.stdout.lower()
 
 
+def test_uninstall_ignores_tampered_agent_paths(tmp_path: Path) -> None:
+    claude_home = tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    install = _run_script(
+        "install.ps1",
+        "-HostTarget",
+        "claude",
+        "-SkipRuntimeInstall",
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+    assert install.returncode == 0, install.stderr
+
+    external_file = tmp_path / "must-not-be-removed.md"
+    external_file.write_text("user content", encoding="utf-8")
+    marker_path = claude_home / "agents" / ".onshape-engineering-agent-owner.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["installed_files"] = [str(external_file)]
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    uninstall = _run_script(
+        "uninstall.ps1",
+        "-HostTarget",
+        "claude",
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert uninstall.returncode == 0, uninstall.stderr
+    assert external_file.read_text(encoding="utf-8") == "user content"
+    assert not marker_path.exists()
+    assert not list((claude_home / "agents").glob("onshape-engineering-*.md"))
+
+
+def test_uninstall_preflights_all_owned_targets_before_staging(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    arguments = [
+        "-HostTarget",
+        "all",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+    ]
+    install = _run_script("install.ps1", *arguments, env=environment)
+    assert install.returncode == 0, install.stderr
+
+    agent_marker = claude_home / "agents" / ".onshape-engineering-agent-owner.json"
+    marker = json.loads(agent_marker.read_text(encoding="utf-8"))
+    marker["repo_root"] = str(tmp_path / "other-repo")
+    agent_marker.write_text(json.dumps(marker), encoding="utf-8")
+
+    uninstall = _run_script(
+        "uninstall.ps1",
+        "-HostTarget",
+        "all",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert uninstall.returncode != 0
+    assert "owned" in uninstall.stderr.lower()
+    assert (codex_home / "skills" / "onshape-engineering").exists()
+    assert (claude_home / "skills" / "onshape-engineering").exists()
+    assert agent_marker.exists()
+    assert (state_dir / "install.json").exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["2", "state"])
+def test_uninstall_restores_all_staged_targets_after_failure(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    arguments = [
+        "-HostTarget",
+        "all",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+    ]
+    install = _run_script("install.ps1", *arguments, env=environment)
+    assert install.returncode == 0, install.stderr
+    state_path = state_dir / "install.json"
+    codex_marker = (
+        codex_home / "skills" / "onshape-engineering.onshape-agent-owner.json"
+    )
+    claude_marker = (
+        claude_home / "skills" / "onshape-engineering.onshape-agent-owner.json"
+    )
+    agent_marker = claude_home / "agents" / ".onshape-engineering-agent-owner.json"
+    preserved_files = [state_path, codex_marker, claude_marker, agent_marker]
+    preserved_files.extend(
+        sorted((claude_home / "agents").glob("onshape-engineering-*.md"))
+    )
+    before = {path: path.read_bytes() for path in preserved_files}
+
+    environment["ONSHAPE_AGENT_TEST_UNINSTALL_STAGE"] = failure_stage
+    uninstall = _run_script(
+        "uninstall.ps1",
+        "-HostTarget",
+        "all",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert uninstall.returncode != 0
+    assert "uninstall" in uninstall.stderr.lower()
+    for path, content in before.items():
+        assert path.read_bytes() == content
+    assert (codex_home / "skills" / "onshape-engineering").exists()
+    assert (claude_home / "skills" / "onshape-engineering").exists()
+    assert not list(state_dir.glob(".onshape-agent-uninstall-*"))
+
+
+def test_uninstall_retains_backup_when_rollback_fails(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    arguments = [
+        "-HostTarget",
+        "codex",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+    ]
+    installed = _run_script(
+        "install.ps1", *arguments, "-SkipRuntimeInstall", env=environment
+    )
+    assert installed.returncode == 0, installed.stderr
+    environment["ONSHAPE_AGENT_TEST_UNINSTALL_STAGE"] = "state"
+    environment["ONSHAPE_AGENT_TEST_UNINSTALL_ROLLBACK"] = "1"
+
+    result = _run_script("uninstall.ps1", *arguments, env=environment)
+
+    assert result.returncode != 0
+    assert "rollback failed" in result.stderr.lower()
+    backups = list(state_dir.glob(".onshape-agent-uninstall-*/item-0001"))
+    assert len(backups) == 1
+    assert (backups[0] / "SKILL.md").is_file()
+    assert (state_dir / "install.json").is_file()
+    assert Path(
+        f"{codex_home / 'skills' / 'onshape-engineering'}.onshape-agent-owner.json"
+    ).is_file()
+
+
+def test_uninstall_reports_cleanup_warning_after_successful_staging(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    arguments = [
+        "-HostTarget",
+        "codex",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+    ]
+    install = _run_script("install.ps1", *arguments, env=environment)
+    assert install.returncode == 0, install.stderr
+
+    environment["ONSHAPE_AGENT_TEST_UNINSTALL_CLEANUP"] = "1"
+    uninstall = _run_script(
+        "uninstall.ps1",
+        "-HostTarget",
+        "codex",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+        env=environment,
+    )
+
+    assert uninstall.returncode == 0, uninstall.stderr
+    summary = json.loads(uninstall.stdout)
+    assert summary["cleanup_warnings"]
+    assert not (codex_home / "skills" / "onshape-engineering").exists()
+    assert not (state_dir / "install.json").exists()
+    assert list(state_dir.glob(".onshape-agent-uninstall-*"))
+
+
+def test_install_rejects_state_owned_by_another_repo_without_force(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state_path = state_dir / "install.json"
+    original = json.dumps({"repo_root": str(tmp_path / "other-repo")})
+    state_path.write_text(original, encoding="utf-8")
+    environment, _, _ = _with_fake_tools(tmp_path)
+    arguments = [
+        "-HostTarget",
+        "codex",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-StateDir",
+        str(state_dir),
+    ]
+
+    rejected = _run_script("install.ps1", *arguments, env=environment)
+
+    assert rejected.returncode != 0
+    assert "state" in rejected.stderr.lower()
+    assert "owned" in rejected.stderr.lower()
+    assert state_path.read_text(encoding="utf-8") == original
+    assert not (codex_home / "skills" / "onshape-engineering").exists()
+
+    forced = _run_script("install.ps1", *arguments, "-Force", env=environment)
+
+    assert forced.returncode == 0, forced.stderr
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert Path(state["repo_root"]).resolve() == REPO_ROOT
+
+
+def test_install_commit_cleanup_warning_keeps_new_install_consistent(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    state_dir = tmp_path / "state"
+    environment, _, _ = _with_fake_tools(tmp_path)
+    arguments = [
+        "-HostTarget",
+        "all",
+        "-SkipRuntimeInstall",
+        "-CodexHome",
+        str(codex_home),
+        "-ClaudeConfigDir",
+        str(claude_home),
+        "-StateDir",
+        str(state_dir),
+    ]
+    first = _run_script("install.ps1", *arguments, env=environment)
+    assert first.returncode == 0, first.stderr
+
+    environment["ONSHAPE_AGENT_TEST_FAIL_COMMIT_CLEANUP"] = "1"
+    second = _run_script("install.ps1", *arguments, env=environment)
+
+    assert second.returncode == 0, second.stderr
+    summary = json.loads(second.stdout)
+    assert summary["cleanup_warnings"]
+    assert (codex_home / "skills" / "onshape-engineering").exists()
+    assert (claude_home / "skills" / "onshape-engineering").exists()
+    assert (state_dir / "install.json").exists()
+    assert list(tmp_path.glob("**/*.onshape-agent-backup-*"))
+
+
 def test_install_validates_pinned_mcp_before_creating_host_links(
     tmp_path: Path,
 ) -> None:
@@ -486,16 +761,8 @@ def test_install_rolls_back_first_host_when_second_host_fails(tmp_path: Path) ->
     assert not list(tmp_path.glob("**/*.onshape-agent-owner.json"))
 
 
-@pytest.mark.parametrize(
-    "failure_variable",
-    [
-        "ONSHAPE_AGENT_TEST_FAIL_AFTER_STATE_WRITE",
-        "ONSHAPE_AGENT_TEST_FAIL_COMMIT_CLEANUP",
-    ],
-)
-def test_install_restores_state_and_hosts_after_late_transaction_failure(
+def test_install_restores_state_and_hosts_after_state_write_failure(
     tmp_path: Path,
-    failure_variable: str,
 ) -> None:
     codex_home = tmp_path / "codex"
     claude_home = tmp_path / "claude"
@@ -529,7 +796,7 @@ def test_install_restores_state_and_hosts_after_late_transaction_failure(
     )
     before = {path: path.read_bytes() for path in preserved_files}
 
-    environment[failure_variable] = "1"
+    environment["ONSHAPE_AGENT_TEST_FAIL_AFTER_STATE_WRITE"] = "1"
     second = _run_script("install.ps1", *arguments, env=environment)
 
     assert second.returncode != 0
@@ -714,7 +981,7 @@ def test_configure_preserves_toml_sections_and_escapes_credentials(
             '[auth]\r\nprovider = "onshape"\r\n'
             'client_id = "old-id"\r\nclient_secret = "old-secret"\r\n'
             'redirect_uri = "old-callback"\r\n\r\n'
-            '[other]\r\nanswer = 42\r\n'
+            "[other]\r\nanswer = 42\r\n"
         ).encode("utf-8")
     )
 
@@ -808,11 +1075,7 @@ def test_skip_runtime_install_without_venv_falls_back_to_importable_python(
     assert Path(state["repo_root"]).resolve() == mini_repo.resolve()
     assert Path(state["python_path"]).is_file()
     launcher = (
-        codex_home
-        / "skills"
-        / "onshape-engineering"
-        / "scripts"
-        / "onshape-agent.ps1"
+        codex_home / "skills" / "onshape-engineering" / "scripts" / "onshape-agent.ps1"
     )
     launcher_environment = dict(environment)
     launcher_environment["ONSHAPE_AGENT_STATE_DIR"] = str(state_dir)

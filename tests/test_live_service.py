@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +14,11 @@ from onshape_agent.live_service import (
     LiveService,
     inspect_local_auth,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
 
 
 @dataclass(frozen=True)
@@ -80,9 +87,7 @@ def test_auth_status_validates_existing_session_without_login() -> None:
         readback_verified=True,
         evidence_summary={"response_present": True},
     )
-    assert session.calls == [
-        ToolCall("onshape_auth_status", {"validate": True})
-    ]
+    assert session.calls == [ToolCall("onshape_auth_status", {"validate": True})]
     assert factory.calls == 1
     assert session.closed is True
 
@@ -180,7 +185,137 @@ def test_local_auth_inspection_checks_presence_without_reading_values(
     assert summary.config_present is True
     assert summary.tokens_present is True
     assert summary.configured is True
+    assert summary.authenticated is None
+    assert summary.verification == "unverified"
     assert summary.network_request_sent is False
     assert summary.credential_values_read is False
     assert "private-config" not in summary.model_dump_json()
     assert "private-token" not in summary.model_dump_json()
+
+
+def test_windows_local_auth_uses_distinct_upstream_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_service.sys, "platform", "win32")
+    monkeypatch.delenv("ONSHAPE_MCP_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    for name, dirname, filename in (
+        ("APPDATA", "roaming", "config.toml"),
+        ("LOCALAPPDATA", "local", "tokens.json"),
+    ):
+        base = tmp_path / dirname
+        root = base / "onshape-mcp"
+        root.mkdir(parents=True)
+        (root / filename).touch()
+        monkeypatch.setenv(name, str(base))
+    status = inspect_local_auth()
+    assert status.config_present and status.tokens_present
+    assert status.authenticated is None
+    assert status.verification == "unverified"
+
+
+@pytest.mark.parametrize("absolute", [True, False])
+def test_xdg_only_accepts_absolute_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absolute: bool,
+) -> None:
+    monkeypatch.setattr(live_service.sys, "platform", "win32")
+    monkeypatch.delenv("ONSHAPE_MCP_CONFIG_DIR", raising=False)
+    for xdg, fallback, filename in (
+        ("XDG_CONFIG_HOME", "APPDATA", "config.toml"),
+        ("XDG_DATA_HOME", "LOCALAPPDATA", "tokens.json"),
+    ):
+        base = tmp_path / xdg
+        (base / "onshape-mcp").mkdir(parents=True)
+        (base / "onshape-mcp" / filename).touch()
+        monkeypatch.setenv(xdg, str(base) if absolute else "relative")
+        monkeypatch.setenv(fallback, str(tmp_path / "missing"))
+    status = inspect_local_auth()
+    assert status.config_present is absolute
+    assert status.tokens_present is absolute
+
+
+def test_local_auth_does_not_guess_token_names(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").touch()
+    for filename in ("token.json", "tokens.backup.json", "token-notes.txt"):
+        (tmp_path / filename).touch()
+    assert inspect_local_auth(tmp_path).tokens_present is False
+
+
+def test_gateway_policy_blocks_service_before_any_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import onshape_agent.gateway as gateway
+    from onshape_agent.policy import PolicyDenied
+
+    def deny(_plan: object) -> object:
+        raise PolicyDenied("SCOPE_DENIED", "test scope denied")
+
+    monkeypatch.setattr(gateway, "validate_and_order", deny)
+    session = FakeSession({"onshape_api_call": {"items": []}})
+    receipt = LiveService(session_factory=lambda: session).list_documents()
+    assert receipt.status == "FAILED"
+    assert receipt.error_code == "SCOPE_DENIED"
+    assert receipt.network_request_sent is False
+    assert session.calls == []
+
+
+def test_live_run_persists_gateway_summary_and_verifiable_hash(tmp_path: Path) -> None:
+    session = FakeSession(
+        {
+            "onshape_api_call": {
+                "items": [{"id": "doc-123", "description": "private-response-body"}]
+            }
+        }
+    )
+    service = LiveService(
+        session_factory=lambda: session, output_root=tmp_path / "audit"
+    )
+    receipt = service.list_documents()
+    (run_dir,) = (tmp_path / "audit").iterdir()
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    execution = manifest["execution"]
+    assert execution["execution_mode"] == "live"
+    assert execution["network_request_sent"] is True
+    assert execution["readback_verified"] is True
+    document = json.loads(
+        (run_dir / "artifacts" / "live_execution_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report = document["payload"]
+    assert report["status"] == "EXECUTED"
+    assert report["receipts"] == [receipt.model_dump(mode="json")]
+    digest = hashlib.sha256(
+        json.dumps(
+            report, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    assert document["metadata"]["content_hash"] == f"sha256:{digest}"
+    assert execution["artifacts"][0]["content_hash"] == f"sha256:{digest}"
+    assert "private-response-body" not in "".join(
+        path.read_text(encoding="utf-8")
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    )
+
+
+def test_failed_session_is_audited_without_exception_contents(tmp_path: Path) -> None:
+    def unavailable() -> object:
+        raise FileNotFoundError("private-command-path")
+
+    service = LiveService(session_factory=unavailable, output_root=tmp_path / "audit")
+    receipt = service.auth_status()
+    assert receipt.error_code == "TRANSPORT_UNAVAILABLE"
+    assert receipt.network_request_sent is False
+    (run_dir,) = (tmp_path / "audit").iterdir()
+    output = "".join(
+        path.read_text(encoding="utf-8")
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    )
+    assert "private-command-path" not in output
+    assert "TRANSPORT_UNAVAILABLE" in output

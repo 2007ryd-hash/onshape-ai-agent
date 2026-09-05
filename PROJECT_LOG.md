@@ -6,3 +6,6 @@ Sanitized development milestones are recorded under `docs/project-log/`. Runtime
 |---|---|---|
 | 2026-08-31 | Generic V1 foundation | Contracts, closed-loop routing, deny-by-default Gateway, immutable artifacts, logging, and safe CLI demo implemented and tested. |
 | 2026-08-31 | Installable dual-host V1.1 | Shared Codex/Claude skill, specialist agents, offline doctor, simple-bracket result, Windows installer, and Apache-2.0 distribution implemented. |
+| 2026-09-05 | V1.11.0 read-only live connection work | Added pinned onshape-mcp OAuth setup/login scripts, explicit live diagnostics and bounded document-read CLI paths. Windows setup and authentication documentation checked against source. Real-account acceptance and publication are not established by this entry; the bracket example remains offline and simulated. |
+| 2026-09-05 | Real-account smoke verification | Existing local OAuth validated with READY_LIVE; bounded document discovery returned one item; selected-document readback confirmed matching ID. No Onshape mutations were sent. |
+| 2026-09-05 | Real MCP installer verification | Temporary Codex/Claude installation with the actual pinned npm package succeeded. Fixed version parsing to accept the real `onshape-mcp 0.5.2` output. |

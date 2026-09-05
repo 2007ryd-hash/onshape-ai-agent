@@ -60,6 +60,7 @@ class RunLog:
         *,
         main_model: str,
         reasoning_effort: str,
+        execution_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         manifest = {
             "schema_version": "1.0",
@@ -68,6 +69,8 @@ class RunLog:
             "main_model": main_model,
             "reasoning_effort": reasoning_effort,
         }
+        if execution_metadata is not None:
+            manifest["execution"] = _redact(execution_metadata)
         _write_json_atomic(self.manifest_path, manifest)
         return manifest
 

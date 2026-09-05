@@ -109,9 +109,27 @@ the side-effect boundary. Include:
 - whether geometry was deterministically read back, visually observed, or only
   simulated.
 
-For this installable V1.1 workflow, the included example is `simulated`, uses
+For v1.11.0, the included simple-bracket example is `simulated`, uses
 the recording transport, and sends no network request. Never describe a
 simulated result as a live Onshape modification. A `live` label is permitted
 only when a configured, authorized transport reports a real request and the
 read-back evidence is present; otherwise state `simulated` or
 `not_configured` and stop at the safe boundary.
+
+## Live connection (Windows, v1.11.0)
+
+Use the installed launcher `scripts/onshape-agent.ps1`:
+
+- `auth status --json` checks local configuration presence, not login validity.
+- `doctor --live --json` explicitly validates the existing Onshape authorization.
+- `live list-documents --limit 1` performs a bounded document discovery read.
+- `live read-document --document-id <id>` verifies a selected document ID.
+
+First-time users run the repository's `scripts/install.ps1`,
+`scripts/configure-onshape.ps1`, then `scripts/login-onshape.ps1`.
+They supply their own OAuth application and authorize it once. Never request
+credentials in conversation or put them in artifacts. The pinned upstream
+`onshape-mcp@0.5.2` manages local tokens and refresh. Its OAuth grant includes
+read and write; this release's Gateway exposes only read operations.
+Live creation of parts, assemblies, mates, or drawings is not implemented in
+this release. Do not interpret successful connection as successful CAD creation.
